@@ -8,7 +8,7 @@ app.use(express.json());
 const WC_URL = process.env.WC_URL || "";
 const WC_KEY = process.env.WC_KEY || "";
 const WC_SECRET = process.env.WC_SECRET || "";
-const MCP_TOKEN = process.env.MCP_TOKEN || "";
+const MCP_TOKEN = process.env.MCP_TOKEN || "test";
 
 // Test rapide
 app.get("/", (_req, res) => {

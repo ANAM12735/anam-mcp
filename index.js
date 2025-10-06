@@ -7,27 +7,27 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// --- WooCommerce config via env ---
-const WC_URL    = process.env.WC_URL || "";     // ex: https://.../wp-json/wc/v3/
-const WC_KEY    = process.env.WC_KEY || "";     // ck_...
-const WC_SECRET = process.env.WC_SECRET || "";  // cs_...
+// ---- WooCommerce config via env ------------------------------------------------
+const WC_URL    = process.env.WC_URL    || ""; // ex: https://anam-and-styles.com/wp-json/wc/v3/
+const WC_KEY    = process.env.WC_KEY    || ""; // ck_...
+const WC_SECRET = process.env.WC_SECRET || ""; // cs_...
 
-// --- Health check ---
+// ---- Health check --------------------------------------------------------------
 app.get("/", (_req, res) => {
   res.json({ ok: true, service: "MCP Anam & Styles", version: 1 });
 });
 
-// --- Debug (ne révèle pas la valeur du token) ---
+// ---- Debug (ne révèle pas la valeur du token) ---------------------------------
 app.get("/debug-auth", (_req, res) => {
   const isSet = !!(process.env.MCP_TOKEN && String(process.env.MCP_TOKEN).length > 0);
   res.json({ MCP_TOKEN_defined: isSet });
 });
 
-// --- Auth Bearer globale (si MCP_TOKEN défini) -----------------------
-// On laisse passer les pages HTML publiques: "/", "/dashboard", "/accounting-dashboard", "/debug-auth"
+// ---- Auth Bearer globale (si MCP_TOKEN défini) --------------------------------
+// On laisse passer /, /dashboard, /accounting-dashboard et /debug-auth (pages HTML)
 app.use((req, res, next) => {
   const token = process.env.MCP_TOKEN || "";
-  if (!token) return next(); // pas de token => aucune auth requise
+  if (!token) return next(); // pas de token => pas d'auth requise
 
   const openPaths = new Set(["/", "/dashboard", "/accounting-dashboard", "/debug-auth"]);
   if (openPaths.has(req.path)) return next();
@@ -39,33 +39,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// --------------------------------------------------------------------
-// --------------------- UTILITAIRES WOO ------------------------------
-// --------------------------------------------------------------------
-
-function requireWoo() {
+// ---- Util: récupérer des commandes WooCommerce --------------------------------
+async function fetchWooOrders({ status = "processing", per_page = 10 }) {
   if (!WC_URL || !WC_KEY || !WC_SECRET) {
     throw new Error("WooCommerce credentials not set");
   }
-}
+  const safePerPage = Math.min(Math.max(parseInt(per_page, 10) || 10, 1), 50);
+  const url = `${WC_URL}orders?status=${encodeURIComponent(status)}&per_page=${safePerPage}`;
 
-function clampInt(v, min, max, def) {
-  const n = parseInt(v, 10);
-  if (Number.isNaN(n)) return def;
-  return Math.min(Math.max(n, min), max);
-}
-
-// Récupère une page simple d'orders
-async function fetchWooOrders({ status = "processing", per_page = 10 }) {
-  requireWoo();
-  const pp = clampInt(per_page, 1, 50, 10);
-  const url = `${WC_URL}orders?status=${encodeURIComponent(status)}&per_page=${pp}`;
   const { data } = await axios.get(url, {
     auth: { username: WC_KEY, password: WC_SECRET },
-    timeout: 15000
+    timeout: 15000,
+    validateStatus: s => s >= 200 && s < 300
   });
-  const arr = Array.isArray(data) ? data : [];
-  return arr.map(o => ({
+
+  const orders = (Array.isArray(data) ? data : []).map(o => ({
     id:           o.id,
     number:       o.number,
     total:        o.total,
@@ -75,56 +63,10 @@ async function fetchWooOrders({ status = "processing", per_page = 10 }) {
     customer:     `${o.billing?.first_name || ""} ${o.billing?.last_name || ""}`.trim(),
     city:         o.shipping?.city || ""
   }));
+  return orders;
 }
 
-// Pagination (utilisée pour la compta)
-async function fetchOrdersPaged({ status, afterISO, beforeISO }) {
-  requireWoo();
-  const results = [];
-  const per_page = 100; // max Woo
-  let page = 1;
-
-  while (true) {
-    const url =
-      `${WC_URL}orders?status=${encodeURIComponent(status)}` +
-      `&per_page=${per_page}&page=${page}` +
-      `&after=${encodeURIComponent(afterISO)}&before=${encodeURIComponent(beforeISO)}`;
-
-    const { data, headers } = await axios.get(url, {
-      auth: { username: WC_KEY, password: WC_SECRET },
-      timeout: 20000,
-      validateStatus: s => s >= 200 && s < 300
-    });
-
-    const arr = Array.isArray(data) ? data : [];
-    results.push(...arr);
-
-    const totalPages = parseInt(headers["x-wp-totalpages"] || "1", 10);
-    if (page >= totalPages) break;
-    page++;
-  }
-  return results;
-}
-
-async function fetchRefundsForOrder(orderId) {
-  requireWoo();
-  const url = `${WC_URL}orders/${orderId}/refunds`;
-  const { data } = await axios.get(url, {
-    auth: { username: WC_KEY, password: WC_SECRET },
-    timeout: 15000
-  });
-  return Array.isArray(data) ? data : [];
-}
-
-function monthKey(dateStr) {
-  // "2025-10-06T04:39:44" -> "2025-10"
-  return (dateStr || "").slice(0, 7);
-}
-
-// --------------------------------------------------------------------
-// ------------------------- API DASHBOARD ----------------------------
-// --------------------------------------------------------------------
-
+// ---- API JSON pour le dashboard commandes -------------------------------------
 app.get("/orders", async (req, res) => {
   try {
     const status = (req.query.status || "processing").toString();
@@ -136,27 +78,27 @@ app.get("/orders", async (req, res) => {
   }
 });
 
+// ---- Page Dashboard (commandes) ------------------------------------------------
 app.get("/dashboard", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="fr">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Dashboard Commandes</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
-    h1 { margin: 0 0 16px; }
-    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
-    label { font-size: 14px; color: #333; }
-    input, select, button { padding: 8px 10px; font-size: 14px; }
-    button { cursor: pointer; }
-    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; font-size: 14px; }
-    th { background: #fafafa; }
-    .badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:12px; background:#eef; }
-    .muted { color:#666; font-size:12px; }
-    .row { overflow:auto; }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dashboard Commandes</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+  h1 { margin: 0 0 16px; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; align-items:center; }
+  label { font-size:14px; color:#333; }
+  input, select, button { padding:8px 10px; font-size:14px; }
+  button { cursor:pointer; }
+  table { width:100%; border-collapse: collapse; margin-top:8px; }
+  th, td { border-bottom:1px solid #eee; padding:10px; text-align:left; font-size:14px; }
+  th { background:#fafafa; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:12px; background:#eef; }
+  .muted { color:#666; font-size:12px; }
+</style>
 </head>
 <body>
   <h1>🧾 Commandes WooCommerce</h1>
@@ -183,318 +125,63 @@ app.get("/dashboard", (_req, res) => {
     <span id="info" class="muted"></span>
   </div>
 
-  <div class="row">
-    <table id="grid">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>N°</th>
-          <th>Total</th>
-          <th>Date</th>
-          <th>Status</th>
-          <th>Client</th>
-          <th>Ville</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
-
-<script>
-  const els = {
-    token: document.getElementById('token'),
-    status: document.getElementById('status'),
-    perpage: document.getElementById('perpage'),
-    refresh: document.getElementById('refresh'),
-    info: document.getElementById('info'),
-    body: document.querySelector('#grid tbody')
-  };
-
-  els.token.value = localStorage.getItem('mcp_token') || '';
-  els.token.addEventListener('change', () => {
-    localStorage.setItem('mcp_token', els.token.value || '');
-  });
-
-  async function load() {
-    els.info.textContent = 'Chargement...';
-    els.body.innerHTML = '';
-    try {
-      const qs = new URLSearchParams({
-        status: els.status.value,
-        per_page: els.perpage.value
-      }).toString();
-
-      const headers = { 'Accept': 'application/json' };
-      const token = els.token.value.trim();
-      if (token) headers['Authorization'] = 'Bearer ' + token;
-
-      const res = await fetch('/orders?' + qs, { headers });
-      const json = await res.json();
-
-      if (!json.ok) throw new Error(json.error || 'Erreur inconnue');
-
-      json.orders.forEach(o => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = \`
-          <td>\${o.id}</td>
-          <td>\${o.number}</td>
-          <td>\${o.total} \${o.currency || ''}</td>
-          <td>\${(o.date_created || '').replace('T',' ').replace('Z','')}</td>
-          <td><span class="badge">\${o.status}</span></td>
-          <td>\${o.customer || ''}</td>
-          <td>\${o.city || ''}</td>
-        \`;
-        els.body.appendChild(tr);
-      });
-
-      els.info.textContent = \`\${json.orders.length} commandes\`;
-    } catch (e) {
-      els.info.textContent = 'Erreur: ' + (e.message || e);
-    }
-  }
-
-  els.refresh.addEventListener('click', load);
-  load();
-</script>
-</body>
-</html>`);
-});
-
-// --------------------------------------------------------------------
-// --------------------------- API COMPTA ------------------------------
-// --------------------------------------------------------------------
-
-// Ex: /accounting?year=2025&statuses=completed,processing
-app.get("/accounting", async (req, res) => {
-  try {
-    const year = parseInt(req.query.year || new Date().getFullYear(), 10);
-    const statuses = (req.query.statuses || "completed,processing")
-      .split(",")
-      .map(s => s.trim())
-      .filter(Boolean);
-
-    requireWoo();
-
-    // bornes de l'année en ISO
-    const afterISO  = new Date(Date.UTC(year, 0, 1, 0, 0, 0)).toISOString();
-    const beforeISO = new Date(Date.UTC(year + 1, 0, 1, 0, 0, 0)).toISOString();
-
-    // init buckets mensuels
-    const months = {};
-    for (let m = 0; m < 12; m++) {
-      const key = `${year}-${String(m + 1).padStart(2, "0")}`;
-      months[key] = {
-        month: key,
-        orders_count: 0,
-        gross_sales: 0,   // total des commandes
-        refunds_count: 0,
-        refunds_total: 0, // total des remboursements
-        net_revenue: 0,   // gross - refunds
-      };
-    }
-
-    // 1) Ventes (CA brut) pour chaque statut choisi
-    for (const status of statuses) {
-      const orders = await fetchOrdersPaged({ status, afterISO, beforeISO });
-      for (const o of orders) {
-        const key = monthKey(o.date_created);
-        const total = parseFloat(o.total || "0") || 0;
-        if (months[key]) {
-          months[key].orders_count += 1;
-          months[key].gross_sales  += total;
-        }
-      }
-    }
-
-    // 2) Remboursements: parcourir toutes les commandes de l'année
-    const allOrders = await fetchOrdersPaged({ status: "any", afterISO, beforeISO });
-    for (const o of allOrders) {
-      const refunds = await fetchRefundsForOrder(o.id);
-      for (const r of refunds) {
-        // r.amount positif côté API Woo ; on agrège par date du refund
-        const k = monthKey(r.date_created || o.date_created);
-        const amt = Math.abs(parseFloat(r.amount || "0") || 0);
-        if (months[k]) {
-          months[k].refunds_count += 1;
-          months[k].refunds_total += amt;
-        }
-      }
-    }
-
-    // 3) Net
-    for (const k of Object.keys(months)) {
-      months[k].gross_sales   = Number(months[k].gross_sales.toFixed(2));
-      months[k].refunds_total = Number(months[k].refunds_total.toFixed(2));
-      months[k].net_revenue   = Number((months[k].gross_sales - months[k].refunds_total).toFixed(2));
-    }
-
-    return res.json({ ok: true, year, statuses, months: Object.values(months) });
-  } catch (e) {
-    const msg = e?.response?.data?.message || e?.message || "Accounting failed";
-    return res.status(500).json({ ok: false, error: msg });
-  }
-});
-
-// Tableau HTML pour la compta
-app.get("/accounting-dashboard", (_req, res) => {
-  res.type("html").send(`<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Comptabilité — Ventes & Remboursements</title>
-<style>
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
-  h1 { margin: 0 0 16px; }
-  .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
-  label { font-size:14px; color:#333; }
-  input, select, button { padding:8px 10px; font-size:14px; }
-  table { width:100%; border-collapse:collapse; margin-top:10px; }
-  th, td { padding:10px; border-bottom:1px solid #eee; text-align:right; }
-  th:first-child, td:first-child { text-align:left; }
-  th { background:#fafafa; }
-  tfoot td { font-weight:bold; background:#f8f8f8; }
-  .muted { color:#666; font-size:12px; margin-left:6px; }
-</style>
-</head>
-<body>
-  <h1>📊 Comptabilité — Ventes & Remboursements</h1>
-  <div class="controls">
-    <label>Token:
-      <input id="token" type="password" placeholder="MCP_TOKEN" style="width:220px" />
-    </label>
-    <label>Année:
-      <input id="year" type="number" min="2018" value="${new Date().getFullYear()}" style="width:90px" />
-    </label>
-    <label>Statuses (ventes):
-      <input id="statuses" type="text" value="completed,processing" style="width:220px" />
-    </label>
-    <button id="refresh">Actualiser</button>
-    <button id="export">Exporter CSV</button>
-    <span id="info" class="muted"></span>
-  </div>
-
   <table id="grid">
     <thead>
-      <tr>
-        <th>Mois</th>
-        <th>Nb commandes</th>
-        <th>Ventes (brut)</th>
-        <th>Remboursements</th>
-        <th>Net</th>
-      </tr>
+      <tr><th>ID</th><th>N°</th><th>Total</th><th>Date</th><th>Status</th><th>Client</th><th>Ville</th></tr>
     </thead>
     <tbody></tbody>
-    <tfoot>
-      <tr>
-        <td>Total</td>
-        <td id="t_orders"></td>
-        <td id="t_gross"></td>
-        <td id="t_refunds"></td>
-        <td id="t_net"></td>
-      </tr>
-    </tfoot>
   </table>
 
 <script>
 const els = {
   token: document.getElementById('token'),
-  year: document.getElementById('year'),
-  statuses: document.getElementById('statuses'),
+  status: document.getElementById('status'),
+  perpage: document.getElementById('perpage'),
   refresh: document.getElementById('refresh'),
-  exportBtn: document.getElementById('export'),
   info: document.getElementById('info'),
-  body: document.querySelector('#grid tbody'),
-  totals: {
-    orders: document.getElementById('t_orders'),
-    gross: document.getElementById('t_gross'),
-    refunds: document.getElementById('t_refunds'),
-    net: document.getElementById('t_net'),
-  }
+  body: document.querySelector('#grid tbody')
 };
 els.token.value = localStorage.getItem('mcp_token') || '';
 els.token.addEventListener('change', () => localStorage.setItem('mcp_token', els.token.value || ''));
 
-let last = [];
-
-function euro(n){ return Number(n||0).toFixed(2) + " €"; }
-
-function render(rows){
+async function load() {
+  els.info.textContent = 'Chargement...';
   els.body.innerHTML = '';
-  let sOrders=0, sGross=0, sRefunds=0, sNet=0;
-  rows.forEach(r=>{
-    sOrders += r.orders_count;
-    sGross  += r.gross_sales;
-    sRefunds+= r.refunds_total;
-    sNet    += r.net_revenue;
-    const tr = document.createElement('tr');
-    tr.innerHTML = \`
-      <td>\${r.month}</td>
-      <td>\${r.orders_count}</td>
-      <td>\${euro(r.gross_sales)}</td>
-      <td>\${euro(r.refunds_total)}</td>
-      <td>\${euro(r.net_revenue)}</td>
-    \`;
-    els.body.appendChild(tr);
-  });
-  els.totals.orders.textContent  = sOrders;
-  els.totals.gross.textContent   = euro(sGross);
-  els.totals.refunds.textContent = euro(sRefunds);
-  els.totals.net.textContent     = euro(sNet);
-}
-
-async function load(){
-  els.info.textContent = 'Calcul en cours...';
-  render([]);
-  try{
-    const qs = new URLSearchParams({
-      year: els.year.value.trim(),
-      statuses: els.statuses.value.trim()
-    }).toString();
-    const headers = { 'Accept':'application/json' };
+  try {
+    const qs = new URLSearchParams({ status: els.status.value, per_page: els.perpage.value }).toString();
+    const headers = { 'Accept': 'application/json' };
     const token = els.token.value.trim();
     if (token) headers['Authorization'] = 'Bearer ' + token;
 
-    const res = await fetch('/accounting?' + qs, { headers });
+    const res = await fetch('/orders?' + qs, { headers });
     const json = await res.json();
-    if(!json.ok) throw new Error(json.error || 'Erreur');
-    last = json.months;
-    render(last);
-    els.info.textContent = 'OK';
-  }catch(e){
+    if (!json.ok) throw new Error(json.error || 'Erreur inconnue');
+
+    json.orders.forEach(o => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = \`
+        <td>\${o.id}</td>
+        <td>\${o.number}</td>
+        <td>\${o.total} \${o.currency || ''}</td>
+        <td>\${(o.date_created || '').replace('T',' ').replace('Z','')}</td>
+        <td><span class="badge">\${o.status}</span></td>
+        <td>\${o.customer || ''}</td>
+        <td>\${o.city || ''}</td>\`;
+      els.body.appendChild(tr);
+    });
+
+    els.info.textContent = \`\${json.orders.length} commandes\`;
+  } catch (e) {
     els.info.textContent = 'Erreur: ' + (e.message || e);
   }
 }
-
-function toCSV(rows){
-  const header = ["month","orders_count","gross_sales","refunds_total","net_revenue"];
-  const escape = v => "\\""+String(v??"").replace(/"/g,'""')+"\\"";
-  const lines=[header.join(",")].concat(rows.map(r=>header.map(k=>escape(r[k])).join(",")));
-  return lines.join("\\n");
-}
-
 els.refresh.addEventListener('click', load);
-els.exportBtn.addEventListener('click', ()=>{
-  if(!last.length){ alert('Rien à exporter'); return; }
-  const csv = toCSV(last);
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const url  = URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  a.href=url; a.download = 'accounting-'+els.year.value+'.csv';
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-});
-
 load();
 </script>
-</body>
-</html>`);
+</body></html>`);
 });
 
-// --------------------------------------------------------------------
-// ----------------------------- MCP ----------------------------------
-// --------------------------------------------------------------------
-
+// ---- MCP endpoint (pour ChatGPT/clients MCP) ----------------------------------
 app.post("/mcp", async (req, res) => {
   const { method, params } = req.body || {};
 
@@ -509,8 +196,8 @@ app.post("/mcp", async (req, res) => {
             input_schema: {
               type: "object",
               properties: {
-                status:   { type: "string", default: "processing" },
-                per_page: { type: "number", default: 10 }
+                status:   { type: "string",  default: "processing" },
+                per_page: { type: "number",  default: 10 }
               }
             }
           }
@@ -522,7 +209,6 @@ app.post("/mcp", async (req, res) => {
   if (method === "tools.call") {
     const name = params?.name;
     const args = params?.arguments || {};
-
     if (name === "getOrders") {
       try {
         const orders = await fetchWooOrders({
@@ -531,24 +217,295 @@ app.post("/mcp", async (req, res) => {
         });
         return res.json({ type: "tool_result", content: orders });
       } catch (e) {
-        const msg =
-          e?.response?.data?.message ||
-          e?.response?.statusText ||
-          e?.message || "Woo request failed";
+        const msg = e?.response?.data?.message || e?.response?.statusText || e?.message || "Woo request failed";
         return res.json({ type: "tool_error", error: msg });
       }
     }
-
     return res.json({ type: "tool_error", error: `Unknown tool: ${name}` });
   }
 
   return res.json({ type: "tool_error", error: "Unknown method" });
 });
 
-// --------------------------------------------------------------------
-// ------------------------- START SERVER -----------------------------
-// --------------------------------------------------------------------
+// ======================== COMPTABILITÉ ================================
 
+// Util
+function monthKey(dateStr) {
+  // "2025-10-06T04:39:44" -> "2025-10"
+  return (dateStr || "").slice(0, 7);
+}
+
+// Pagination générique côté Woo (after/before ISO 8601)
+async function fetchOrdersPaged({ status, afterISO, beforeISO }) {
+  const results = [];
+  const per_page = 100; // max Woo
+  let page = 1;
+
+  while (true) {
+    const url = `${WC_URL}orders?status=${encodeURIComponent(status)}&per_page=${per_page}&page=${page}&after=${encodeURIComponent(afterISO)}&before=${encodeURIComponent(beforeISO)}`;
+    const { data, headers } = await axios.get(url, {
+      auth: { username: WC_KEY, password: WC_SECRET },
+      timeout: 20000,
+      validateStatus: s => s >= 200 && s < 300
+    });
+    results.push(...(Array.isArray(data) ? data : []));
+    const totalPages = parseInt(headers["x-wp-totalpages"] || "1", 10);
+    if (page >= totalPages) break;
+    page++;
+  }
+  return results;
+}
+
+// Récupérer tous les refunds d'une commande
+async function fetchRefundsForOrder(orderId) {
+  const url = `${WC_URL}orders/${orderId}/refunds`;
+  const { data } = await axios.get(url, {
+    auth: { username: WC_KEY, password: WC_SECRET },
+    timeout: 15000,
+    validateStatus: s => s >= 200 && s < 300
+  });
+  return Array.isArray(data) ? data : [];
+}
+
+// ---- API Comptabilité JSON ------------------------------------------
+app.get("/accounting", async (req, res) => {
+  try {
+    const year = parseInt(req.query.year || new Date().getFullYear(), 10);
+    const statuses = (req.query.statuses || "completed,processing")
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    if (!WC_URL || !WC_KEY || !WC_SECRET) {
+      return res.status(500).json({ ok: false, error: "WooCommerce credentials not set" });
+    }
+
+    const afterISO  = new Date(Date.UTC(year,     0, 1)).toISOString();
+    const beforeISO = new Date(Date.UTC(year + 1, 0, 1)).toISOString();
+
+    // Init mois
+    const months = {};
+    for (let m = 0; m < 12; m++) {
+      const key = `${year}-${String(m + 1).padStart(2, "0")}`;
+      months[key] = {
+        month: key,
+        orders_count: 0,
+        gross_sales: 0,
+        refunds_count: 0,
+        refunds_total: 0,
+        net_revenue: 0
+      };
+    }
+
+    // Ventes brutes par status choisi
+    for (const status of statuses) {
+      const orders = await fetchOrdersPaged({ status, afterISO, beforeISO });
+      for (const o of orders) {
+        const key = monthKey(o.date_created);
+        const total = parseFloat(o.total || "0") || 0;
+        if (months[key]) {
+          months[key].orders_count++;
+          months[key].gross_sales += total;
+        }
+      }
+    }
+
+    // Remboursements (tous statuts)
+    const allOrders = await fetchOrdersPaged({ status: "any", afterISO, beforeISO });
+    for (const o of allOrders) {
+      const refunds = await fetchRefundsForOrder(o.id);
+      for (const r of refunds) {
+        const key = monthKey(r.date_created || o.date_created);
+        const amt = Math.abs(parseFloat(r.amount || "0")) || 0;
+        if (months[key]) {
+          months[key].refunds_count++;
+          months[key].refunds_total += amt;
+        }
+      }
+    }
+
+    // Net
+    for (const k of Object.keys(months)) {
+      const m = months[k];
+      m.gross_sales   = +m.gross_sales.toFixed(2);
+      m.refunds_total = +m.refunds_total.toFixed(2);
+      m.net_revenue   = +(m.gross_sales - m.refunds_total).toFixed(2);
+    }
+
+    res.json({ ok: true, year, statuses, months: Object.values(months) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || "Accounting failed" });
+  }
+});
+
+// ---- Mini Dashboard Comptabilité (HTML) ---------------------------------------
+app.get("/accounting-dashboard", (_req, res) => {
+  res.type("html").send(`<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Comptabilité — Ventes & Remboursements</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+  h1 { margin: 0 0 16px; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; align-items:center; }
+  label { font-size:14px; color:#333; }
+  input, select, button { padding:8px 10px; font-size:14px; }
+  table { width:100%; border-collapse: collapse; margin-top:8px; }
+  th, td { border-bottom:1px solid #eee; padding:10px; text-align:left; font-size:14px; }
+  th { background:#fafafa; }
+  .muted { color:#666; font-size:12px; }
+  .right { text-align:right; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:12px; font-size:12px; background:#eef; }
+</style>
+</head>
+<body>
+  <h1>📊 Comptabilité — Ventes & Remboursements</h1>
+
+  <div class="controls">
+    <label>Token:
+      <input id="token" type="password" placeholder="MCP_TOKEN" style="width:220px" />
+    </label>
+    <label>Année:
+      <input id="year" type="number" min="2000" max="2100" style="width:100px" />
+    </label>
+    <label>Statuts (ventes):
+      <input id="statuses" type="text" value="completed,processing" style="width:220px" />
+    </label>
+    <button id="refresh">Actualiser</button>
+    <button id="export">Exporter CSV</button>
+    <span id="info" class="muted"></span>
+  </div>
+
+  <table id="grid">
+    <thead>
+      <tr>
+        <th>Mois</th>
+        <th class="right">Nb commandes</th>
+        <th class="right">Ventes brutes (EUR)</th>
+        <th class="right">Nb remboursements</th>
+        <th class="right">Remboursements (EUR)</th>
+        <th class="right">Net (EUR)</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+    <tfoot>
+      <tr>
+        <th>Total</th>
+        <th class="right" id="t_orders">0</th>
+        <th class="right" id="t_gross">0.00</th>
+        <th class="right" id="t_refcnt">0</th>
+        <th class="right" id="t_refund">0.00</th>
+        <th class="right" id="t_net">0.00</th>
+      </tr>
+    </tfoot>
+  </table>
+
+<script>
+const els = {
+  token: document.getElementById('token'),
+  year: document.getElementById('year'),
+  statuses: document.getElementById('statuses'),
+  refresh: document.getElementById('refresh'),
+  export: document.getElementById('export'),
+  info: document.getElementById('info'),
+  body: document.querySelector('#grid tbody'),
+  t_orders: document.getElementById('t_orders'),
+  t_gross: document.getElementById('t_gross'),
+  t_refcnt: document.getElementById('t_refcnt'),
+  t_refund: document.getElementById('t_refund'),
+  t_net: document.getElementById('t_net')
+};
+els.token.value = localStorage.getItem('mcp_token') || '';
+els.token.addEventListener('change', () => localStorage.setItem('mcp_token', els.token.value || ''));
+els.year.value = new Date().getFullYear();
+
+let lastData = null;
+
+function toCSV(rows) {
+  const esc = v => ('"'+String(v).replaceAll('"','""')+'"');
+  return rows.map(r => r.map(esc).join(',')).join('\\n');
+}
+
+function download(filename, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type:'text/csv;charset=utf-8;' }));
+  a.download = filename;
+  a.click();
+}
+
+async function load() {
+  els.info.textContent = 'Chargement...';
+  els.body.innerHTML = '';
+  try {
+    const qs = new URLSearchParams({
+      year: els.year.value,
+      statuses: els.statuses.value
+    }).toString();
+    const headers = { 'Accept': 'application/json' };
+    const token = els.token.value.trim();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+
+    const res = await fetch('/accounting?' + qs, { headers });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Erreur inconnue');
+
+    lastData = json;
+    let totOrders = 0, totGross = 0, totRefCnt = 0, totRefund = 0, totNet = 0;
+
+    json.months.forEach(m => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = \`
+        <td>\${m.month}</td>
+        <td class="right">\${m.orders_count}</td>
+        <td class="right">\${m.gross_sales.toFixed(2)}</td>
+        <td class="right">\${m.refunds_count}</td>
+        <td class="right">\${m.refunds_total.toFixed(2)}</td>
+        <td class="right"><span class="pill">\${m.net_revenue.toFixed(2)}</span></td>\`;
+      els.body.appendChild(tr);
+
+      totOrders += m.orders_count;
+      totGross  += m.gross_sales;
+      totRefCnt += m.refunds_count;
+      totRefund += m.refunds_total;
+      totNet    += m.net_revenue;
+    });
+
+    els.t_orders.textContent = totOrders;
+    els.t_gross.textContent  = totGross.toFixed(2);
+    els.t_refcnt.textContent = totRefCnt;
+    els.t_refund.textContent = totRefund.toFixed(2);
+    els.t_net.textContent    = totNet.toFixed(2);
+
+    els.info.textContent = 'OK';
+  } catch (e) {
+    els.info.textContent = 'Erreur: ' + (e.message || e);
+  }
+}
+
+els.refresh.addEventListener('click', load);
+els.export.addEventListener('click', () => {
+  if (!lastData?.months) return;
+  const rows = [
+    ['Mois','Nb commandes','Ventes brutes (EUR)','Nb remboursements','Remboursements (EUR)','Net (EUR)']
+  ];
+  let totOrders=0, totGross=0, totRefCnt=0, totRefund=0, totNet=0;
+  lastData.months.forEach(m => {
+    rows.push([m.month, m.orders_count, m.gross_sales, m.refunds_count, m.refunds_total, m.net_revenue]);
+    totOrders+=m.orders_count; totGross+=m.gross_sales; totRefCnt+=m.refunds_count; totRefund+=m.refunds_total; totNet+=m.net_revenue;
+  });
+  rows.push(['TOTAL', totOrders, totGross.toFixed(2), totRefCnt, totRefund.toFixed(2), totNet.toFixed(2)]);
+  const csv = toCSV(rows);
+  download(\`compta-\${(lastData.year||'')}.csv\`, csv);
+});
+
+load();
+</script>
+</body></html>`);
+});
+
+// ---- Start server --------------------------------------------------------------
 app.listen(PORT, () => {
   console.log(`🔹 MCP server running on port ${PORT}`);
 });

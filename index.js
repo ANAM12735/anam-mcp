@@ -255,3 +255,39 @@ app.post("/mcp", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🔹 MCP server running on port ${PORT}`);
 });
+// -------- Utils compta --------
+function monthKey(dateStr) {
+  // "2025-10-06T04:39:44" -> "2025-10"
+  return (dateStr || "").slice(0, 7);
+}
+
+// Paginer /orders côté Woo (after/before sont ISO 8601)
+async function fetchOrdersPaged({ status, afterISO, beforeISO }) {
+  const results = [];
+  const per_page = 100; // max Woo
+  let page = 1;
+
+  while (true) {
+    const url = `${WC_URL}orders?status=${encodeURIComponent(status)}&per_page=${per_page}&page=${page}&after=${encodeURIComponent(afterISO)}&before=${encodeURIComponent(beforeISO)}`;
+    const { data, headers } = await axios.get(url, {
+      auth: { username: WC_KEY, password: WC_SECRET },
+      timeout: 20000,
+      validateStatus: s => s >= 200 && s < 300
+    });
+    results.push(...data);
+    const totalPages = parseInt(headers["x-wp-totalpages"] || "1", 10);
+    if (page >= totalPages) break;
+    page++;
+  }
+  return results;
+}
+
+// Récupérer tous les refunds d'une commande
+async function fetchRefundsForOrder(orderId) {
+  const url = `${WC_URL}orders/${orderId}/refunds`;
+  const { data } = await axios.get(url, {
+    auth: { username: WC_KEY, password: WC_SECRET },
+    timeout: 15000,
+  });
+  return Array.isArray(data) ? data : [];
+}

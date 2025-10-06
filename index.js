@@ -583,3 +583,138 @@ app.get("/accounting-dashboard", (_req, res) => {
 app.listen(PORT, () => {
   console.log(`MCP server running on port ${PORT}`);
 });
+// -------- utils mapping & somme --------
+function frStatus(wooStatus) {
+  const map = {
+    'completed': 'Terminée',
+    'processing': 'En cours de traitement',
+    'on-hold': 'En attente',
+    'pending': 'En attente de paiement',
+    'cancelled': 'Annulée',
+    'refunded': 'Remboursée',
+    'failed': 'Échouée'
+  };
+  return map[wooStatus] || wooStatus;
+}
+
+function monthFilter(dateStr, y, m) {
+  if (!y) return true;
+  const d = new Date(dateStr || '');
+  if (isNaN(d)) return false;
+  if (m) return (d.getUTCFullYear() === y && (d.getUTCMonth() + 1) === m);
+  return (d.getUTCFullYear() === y);
+}
+
+function orderAmount(o, mode) {
+  if (mode === 'woo') {
+    // net produits (hors taxes / port), proche “Ventes nettes”
+    return (o.line_items || []).reduce((s, li) => s + (parseFloat(li.total || '0') || 0), 0);
+  }
+  // brut commande (produits + port + taxes – remises)
+  return parseFloat(o.total || '0') || 0;
+}
+
+// -------- export plat JSON --------
+app.get('/orders-flat', async (req, res) => {
+  try {
+    const year = parseInt(req.query.year || new Date().getUTCFullYear(), 10);
+    const month = req.query.month ? parseInt(req.query.month, 10) : null;
+    const statuses = (req.query.statuses || 'completed,processing')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const limit = parseInt(req.query.limit || '0', 10); // 0 = illimité
+    const includeRefunds = String(req.query.include_refunds || 'false') === 'true';
+    const mode = (req.query.mode || 'woo'); // 'woo' | 'gross'
+
+    const afterISO  = new Date(Date.UTC(year, month ? month - 1 : 0, 1)).toISOString();
+    const beforeISO = new Date(Date.UTC(year, month ? month : 12, 1)).toISOString();
+
+    let rows = [];
+
+    // commandes
+    for (const status of statuses) {
+      const orders = await fetchOrdersPaged({ status, afterISO, beforeISO });
+      for (const o of orders) {
+        const date = o.date_paid || o.date_created;
+        if (!monthFilter(date, year, month)) continue;
+
+        rows.push({
+          date: (date || '').replace('T',' ').replace('Z',''),
+          reference: o.number,
+          client: `${o.billing?.first_name || ''} ${o.billing?.last_name || ''}`.trim(),
+          nature: frStatus(o.status),
+          paiement: o.payment_method_title || o.payment_method || '',
+          montant_eur: +orderAmount(o, mode).toFixed(2)
+        });
+
+        if (limit > 0 && rows.length >= limit) break;
+      }
+      if (limit > 0 && rows.length >= limit) break;
+    }
+
+    // (optionnel) remboursements à intégrer comme lignes négatives
+    if (includeRefunds) {
+      // prends toutes les commandes de la période pour leurs refunds
+      const all = await fetchOrdersPaged({ status: 'any', afterISO, beforeISO });
+      for (const o of all) {
+        const refunds = await fetchRefundsForOrder(o.id);
+        for (const r of refunds) {
+          const date = r.date_created || o.date_created;
+          if (!monthFilter(date, year, month)) continue;
+          const amt = -(Math.abs(parseFloat(r.amount || '0')) || 0); // négatif
+
+          rows.push({
+            date: (date || '').replace('T',' ').replace('Z',''),
+            reference: `R-${o.number}`,
+            client: `${o.billing?.first_name || ''} ${o.billing?.last_name || ''}`.trim(),
+            nature: 'Remboursée',
+            paiement: o.payment_method_title || o.payment_method || '',
+            montant_eur: +amt.toFixed(2)
+          });
+
+          if (limit > 0 && rows.length >= limit) break;
+        }
+        if (limit > 0 && rows.length >= limit) break;
+      }
+    }
+
+    // tri par date
+    rows.sort((a,b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+    res.json({ ok: true, count: rows.length, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'orders-flat failed' });
+  }
+});
+
+// -------- export CSV (Excel-ready) --------
+app.get('/orders-csv', async (req, res) => {
+  try {
+    // on réutilise /orders-flat côté serveur
+    req.url = req.url.replace('/orders-csv', '/orders-flat');
+    const resp = await axios.get(`${req.protocol}://${req.get('host')}${req.url}`);
+    const rows = resp.data?.rows || [];
+
+    const header = [
+      'Date', 'Référence', 'Nom du client', 'Nature', 'Paiement', 'Montant encaissé (EUR)'
+    ];
+    const csv = [
+      header.join(';'),
+      ...rows.map(r =>
+        [
+          r.date,
+          r.reference,
+          r.client.replaceAll(';', ','),
+          r.nature,
+          (r.paiement || '').replaceAll(';', ','),
+          r.montant_eur.toFixed(2).replace('.', ',')
+        ].join(';')
+      )
+    ].join('\r\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="orders.csv"');
+    res.send(csv);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'orders-csv failed' });
+  }
+});

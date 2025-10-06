@@ -221,7 +221,7 @@ app.post("/mcp", async (req, res) => {
         return res.json({ type: "tool_error", error: msg });
       }
     }
-    return res.json({ type: "tool_error", error: `Unknown tool: ${name}` });
+    return res.json({ type: "tool_error", error: "Unknown tool: " + name });
   }
 
   return res.json({ type: "tool_error", error: "Unknown method" });

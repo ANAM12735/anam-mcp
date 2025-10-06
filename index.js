@@ -253,5 +253,5 @@ app.post("/mcp", async (req, res) => {
 
 // --- Start server ---
 app.listen(PORT, () => {
-  console.log(\`✅ MCP server running on port \${PORT}\`);
+  console.log(`🔹 MCP server running on port ${PORT}`);
 });

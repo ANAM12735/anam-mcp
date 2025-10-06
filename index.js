@@ -12,7 +12,7 @@ const WOO_KEY = process.env.WC_KEY;
 const WOO_SECRET = process.env.WC_SECRET;
 const MCP_TOKEN = process.env.MCP_TOKEN;
 
-// ---------------------- AUTH ----------------------
+// Middleware d’authentification
 app.use((req, res, next) => {
   const token = req.query.token || req.headers.authorization?.replace("Bearer ", "");
   if (!token || token !== MCP_TOKEN) {
@@ -21,7 +21,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------------------- UTILS ----------------------
+// Fonction utilitaire pour récupérer depuis WooCommerce
 async function fetchFromWoo(endpoint) {
   const response = await fetch(`${WOO_URL}${endpoint}`, {
     headers: {
@@ -34,9 +34,10 @@ async function fetchFromWoo(endpoint) {
   return await response.json();
 }
 
-// ---------------------- ROUTES ----------------------
+// Page principale
 app.get("/", (req, res) => res.send("✅ MCP actif"));
 
+// Tableau de comptabilité
 app.get("/accounting-dashboard", (req, res) => {
   res.send(`
   <html>
@@ -96,7 +97,7 @@ app.get("/accounting-dashboard", (req, res) => {
   `);
 });
 
-// ---------------------- API ----------------------
+// Endpoint comptable
 app.get("/accounting", async (req, res) => {
   try {
     const year = parseInt(req.query.year || "2025");
@@ -110,11 +111,11 @@ app.get("/accounting", async (req, res) => {
       let totalSales = 0, totalRefunds = 0, count = 0, refundsCount = 0;
 
       for (const status of statuses) {
-        const orders = await fetchFromWoo(\`/orders?status=\${status}&after=\${afterISO}&before=\${beforeISO}&per_page=50\`);
-        for (const o of orders) {
+        const commandes = await fetchFromWoo(`/orders?status=${status}&after=${afterISO}&before=${beforeISO}&per_page=50`);
+        for (const o of commandes) {
           totalSales += parseFloat(o.total);
           count++;
-          const refunds = await fetchFromWoo(\`/orders/\${o.id}/refunds\`);
+          const refunds = await fetchFromWoo(`/orders/${o.id}/refunds`);
           for (const r of refunds) {
             totalRefunds += parseFloat(r.amount);
             refundsCount++;
@@ -138,5 +139,5 @@ app.get("/accounting", async (req, res) => {
   }
 });
 
-// ---------------------- SERVER ----------------------
+// Lancement serveur
 app.listen(PORT, () => console.log("✅ MCP server running on port", PORT));

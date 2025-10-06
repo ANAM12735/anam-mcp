@@ -1,107 +1,74 @@
-// === index.js — Version complète et corrigée ===
-
-// Import des modules
 import express from "express";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-// Création de l’app Express
 const app = express();
 app.use(express.json());
 
-// --- Vérification de la config ---
-app.get("/", (req, res) => {
-  res.send("✅ Serveur MCP en ligne et fonctionnel !");
-});
+const PORT = process.env.PORT || 10000;
 
-app.get("/debug-auth", (req, res) => {
-  res.json({
-    MCP_TOKEN_defined: !!process.env.MCP_TOKEN,
-    MCP_TOKEN: process.env.MCP_TOKEN ? "✔️ défini" : "❌ manquant",
-  });
-});
-
-// --- Fonction utilitaire pour WooCommerce ---
-async function fetchFromWoo(endpoint) {
-  const url = `${process.env.WC_URL}/wp-json/wc/v3${endpoint}`;
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Basic ${Buffer.from(
-        process.env.WC_KEY + ":" + process.env.WC_SECRET
-      ).toString("base64")}`,
-    },
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Erreur WooCommerce ${response.status} : ${text}`);
+// Vérification du token dans les requêtes
+function checkAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const expected = process.env.MCP_TOKEN;
+  if (!expected) {
+    return res.status(500).json({ error: "MCP_TOKEN non défini côté serveur" });
   }
-
-  return response.json();
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Jeton manquant ou mal formé" });
+  }
+  const token = authHeader.split(" ")[1];
+  if (token !== expected) {
+    return res.status(403).json({ error: "Jeton invalide" });
+  }
+  next();
 }
 
-// === ROUTE PRINCIPALE /mcp ===
-app.post("/mcp", async (req, res) => {
+// Route principale MCP
+app.post("/mcp", checkAuth, async (req, res) => {
   try {
-    const authHeader = req.headers["authorization"];
-
-    if (!authHeader || authHeader !== `Bearer ${process.env.MCP_TOKEN}`) {
-      return res.status(401).json({ error: "Non autorisé" });
-    }
-
     const { method, params } = req.body;
 
-    // Vérification du format
-    if (!method || !params) {
-      return res.status(400).json({ error: "Requête mal formée" });
+    if (method !== "tools.call" || !params?.name) {
+      return res.status(400).json({ error: "Requête MCP invalide" });
     }
 
-    // Liste des outils disponibles
-    if (method === "tools.list") {
-      return res.json({
-        tools: [
-          {
-            name: "getOrders",
-            description: "Récupère les commandes WooCommerce",
-            input_schema: {
-              type: "object",
-              properties: {
-                status: { type: "string" },
-                per_page: { type: "number" },
-              },
-            },
-          },
-        ],
+    if (params.name === "getOrders") {
+      const { status, per_page } = params.arguments || {};
+
+      // ✅ Remplace ICI par ton domaine WooCommerce et clé API
+      const wooUrl = `https://anamandstyles.com/wp-json/wc/v3/orders?status=${status}&per_page=${per_page}`;
+      const wooRes = await fetch(wooUrl, {
+        headers: {
+          Authorization: `Basic ${Buffer.from(
+            process.env.WOO_KEY + ":" + process.env.WOO_SECRET
+          ).toString("base64")}`,
+        },
       });
-    }
 
-    // Appel réel à WooCommerce
-    if (method === "tools.call") {
-      if (params.name === "getOrders") {
-        const { status = "completed,processing", per_page = 10 } =
-          params.arguments || {};
-
-        const commandes = await fetchFromWoo(
-          `/orders?status=${status}&per_page=${per_page}`
-        );
-
-        return res.json({ commandes });
-      } else {
-        return res.status(400).json({ error: "Outil inconnu" });
+      if (!wooRes.ok) {
+        const text = await wooRes.text();
+        return res.status(wooRes.status).json({ error: text });
       }
+
+      const data = await wooRes.json();
+      return res.json({ success: true, count: data.length, orders: data });
     }
 
-    res.status(400).json({ error: "Méthode inconnue" });
+    return res.status(400).json({ error: "Outil inconnu" });
   } catch (err) {
-    console.error("❌ Erreur MCP :", err);
+    console.error("Erreur MCP :", err);
     res.status(500).json({ error: "Erreur interne du serveur" });
   }
 });
 
-// === Lancement du serveur ===
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`🚀 Serveur MCP actif sur le port ${PORT}`)
-);
+// Vérification token pour debug
+app.get("/debug-auth", (req, res) => {
+  res.json({ MCP_TOKEN_defined: !!process.env.MCP_TOKEN });
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ Serveur MCP actif sur le port ${PORT}`);
+});

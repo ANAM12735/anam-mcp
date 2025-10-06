@@ -149,3 +149,122 @@ app.post("/mcp", mcpAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ MCP server on ${PORT}`);
 });
+// ---------- ROUTES COMPTA (à placer AVANT app.listen) ----------
+
+// Petite page de test pour voir que le dashboard répond
+app.get("/accounting-dashboard", (_req, res) => {
+  res.type("html").send(`<!doctype html>
+<html lang="fr"><meta charset="utf-8" />
+<title>Comptabilité — MCP</title>
+<body style="font-family:system-ui,Arial;padding:24px">
+  <h1>Comptabilité — MCP OK ✅</h1>
+  <p>Utilisez <code>/orders-flat</code> pour récupérer la liste à plat (Excel-like).</p>
+  <p>Exemple: <code>/orders-flat?year=2025&month=10&statuses=completed,processing&limit=500&include_refunds=true&mode=excel</code></p>
+</body></html>`);
+});
+
+// Utilitaire: bornes d'un mois (UTC)
+function monthRange(year, month) {
+  // month = 1..12
+  const y = parseInt(year, 10);
+  const m = parseInt(month, 10) - 1;
+  const afterISO = new Date(Date.UTC(y, m, 1, 0, 0, 0)).toISOString();
+  const beforeISO = new Date(Date.UTC(y, m + 1, 1, 0, 0, 0)).toISOString();
+  return { afterISO, beforeISO };
+}
+
+// Récupère tous les refunds d'une commande
+async function wooGetRefunds(orderId) {
+  return await wooGetJSON(`orders/${orderId}/refunds`);
+}
+
+/**
+ * /orders-flat
+ * Query:
+ *  - year=2025
+ *  - month=10
+ *  - statuses=completed,processing
+ *  - limit=500 (max lignes retournées; côté Woo on pagine par 100)
+ *  - include_refunds=true|false (ajoute des lignes "Remboursé" négatives)
+ *  - mode=excel|woo (juste informatif)
+ */
+app.get("/orders-flat", async (req, res) => {
+  try {
+    const year = parseInt(req.query.year || new Date().getUTCFullYear(), 10);
+    const month = parseInt(req.query.month || (new Date().getUTCMonth() + 1), 10);
+    const statuses = String(req.query.statuses || "completed,processing")
+      .split(",").map(s => s.trim()).filter(Boolean);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit || "500", 10), 2000));
+    const includeRefunds = String(req.query.include_refunds || "true").toLowerCase() === "true";
+
+    if (!WC_URL || !WC_KEY || !WC_SECRET) {
+      return res.status(500).json({ ok:false, error:"WooCommerce credentials not set" });
+    }
+
+    const { afterISO, beforeISO } = monthRange(year, month);
+
+    // Récupération paginée des commandes (on limite par 100 par requête)
+    const rows = [];
+    for (const status of statuses) {
+      let page = 1;
+      while (rows.length < limit) {
+        const per_page = Math.min(100, limit - rows.length);
+        const q = `orders?status=${encodeURIComponent(status)}&per_page=${per_page}&page=${page}&after=${encodeURIComponent(afterISO)}&before=${encodeURIComponent(beforeISO)}`;
+        const data = await wooGetJSON(q);
+        if (!Array.isArray(data) || data.length === 0) break;
+
+        for (const o of data) {
+          // Ligne "Paiement"
+          rows.push({
+            date: (o.date_created || "").replace("T"," ").replace("Z",""),
+            reference: o.number,
+            nom: (o.billing?.last_name || "").toString().trim(),
+            prenom: (o.billing?.first_name || "").toString().trim(),
+            nature: "Payé",
+            moyen_paiement: o.payment_method_title || o.payment_method || "",
+            montant: parseFloat(o.total || "0") || 0,
+            currency: o.currency || "EUR",
+            status: o.status || "",
+            ville: o.billing?.city || o.shipping?.city || ""
+          });
+
+          // Lignes "Remboursé" (si demandé)
+          if (includeRefunds) {
+            const refunds = await wooGetRefunds(o.id);
+            if (Array.isArray(refunds) && refunds.length > 0) {
+              for (const r of refunds) {
+                rows.push({
+                  date: (r.date_created || o.date_created || "").replace("T"," ").replace("Z",""),
+                  reference: `${o.number}-R${r.id}`,
+                  nom: (o.billing?.last_name || "").toString().trim(),
+                  prenom: (o.billing?.first_name || "").toString().trim(),
+                  nature: "Remboursé",
+                  moyen_paiement: o.payment_method_title || o.payment_method || "",
+                  montant: -Math.abs(parseFloat(r.amount || "0") || 0),
+                  currency: o.currency || "EUR",
+                  status: "refunded",
+                  ville: o.billing?.city || o.shipping?.city || ""
+                });
+              }
+            }
+          }
+
+          if (rows.length >= limit) break;
+        }
+        if (data.length < per_page || rows.length >= limit) break;
+        page++;
+      }
+      if (rows.length >= limit) break;
+    }
+
+    return res.json({
+      ok: true,
+      year, month, statuses, include_refunds: includeRefunds,
+      count: rows.length,
+      rows
+    });
+  } catch (e) {
+    console.error("orders-flat ERROR:", e);
+    res.status(500).json({ ok:false, error: e?.message || "Server error" });
+  }
+});

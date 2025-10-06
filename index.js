@@ -1,12 +1,14 @@
+// index.js — MCP + Comptabilité (ESM)
+
 import express from "express";
-import fetch from "node-fetch";
 
 // ---------- CONFIG ----------
-const PORT     = process.env.PORT || 10000;
-const MCP_TOKEN = process.env.MCP_TOKEN || "";
-const WC_URL    = (process.env.WC_URL || "").replace(/\/+$/,""); // ex: https://anam-and-styles.com/wp-json/wc/v3
-const WC_KEY    = process.env.WC_KEY || "";     // ck_...
-const WC_SECRET = process.env.WC_SECRET || "";  // cs_...
+const PORT       = process.env.PORT || 10000;
+const MCP_TOKEN  = process.env.MCP_TOKEN || "";
+// Doit ressembler à: https://anam-and-styles.com/wp-json/wc/v3
+const WC_URL     = (process.env.WC_URL || "").replace(/\/+$/,"");
+const WC_KEY     = process.env.WC_KEY || "";     // ck_...
+const WC_SECRET  = process.env.WC_SECRET || "";  // cs_...
 
 // ---------- APP ----------
 const app = express();
@@ -17,15 +19,56 @@ app.get("/", (_req, res) => {
   res.json({ ok: true, service: "MCP Anam", version: 1 });
 });
 
-// Debug token
+// Debug token / env
 app.get("/debug-auth", (_req, res) => {
   res.json({
     MCP_TOKEN_defined: !!MCP_TOKEN,
-    WC_URL_set: !!WC_URL,
-    WC_KEY_set: !!WC_KEY,
-    WC_SECRET_set: !!WC_SECRET,
+    WC_URL_set:  !!WC_URL,
+    WC_KEY_set:  !!WC_KEY,
+    WC_SECRET_set:!!WC_SECRET,
   });
 });
+
+// ---------- Utils ----------
+function requireWooCreds() {
+  if (!WC_URL || !WC_KEY || !WC_SECRET) {
+    throw new Error("WooCommerce credentials not set (WC_URL, WC_KEY, WC_SECRET).");
+  }
+}
+
+// Appel Woo en Basic Auth ck/cs
+async function wooGetJSON(pathWithQuery) {
+  requireWooCreds();
+  const url   = `${WC_URL.replace(/\/+$/,"")}/${pathWithQuery.replace(/^\/+/, "")}`;
+  const basic = Buffer.from(`${WC_KEY}:${WC_SECRET}`).toString("base64");
+
+  const r = await fetch(url, {
+    headers: {
+      Authorization: `Basic ${basic}`,
+      Accept: "application/json",
+      "User-Agent": "anam-mcp/1.0"
+    }
+  });
+
+  const text = await r.text();
+
+  if (!r.ok) {
+    // Essaye d'extraire un message d'erreur JSON de Woo
+    try {
+      const j = JSON.parse(text);
+      const msg = j.message || j.error || JSON.stringify(j);
+      throw new Error(`Woo ${r.status}: ${msg}`);
+    } catch {
+      throw new Error(`Woo ${r.status}: ${text}`);
+    }
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Réponse Woo non-JSON: " + text.slice(0, 400));
+  }
+}
 
 // Auth Bearer pour /mcp
 function mcpAuth(req, res, next) {
@@ -43,46 +86,11 @@ function mcpAuth(req, res, next) {
   next();
 }
 
-// Utilitaire fetch Woo (Basic Auth ck/cs) + gestion d’erreur détaillée
-async function wooGetJSON(pathWithQuery) {
-  if (!WC_URL || !WC_KEY || !WC_SECRET) {
-    throw new Error("WooCommerce credentials not set (WC_URL, WC_KEY, WC_SECRET).");
-  }
-  const url = `${WC_URL.replace(/\/+$/,"")}/${pathWithQuery.replace(/^\/+/, "")}`;
-  const basic = Buffer.from(`${WC_KEY}:${WC_SECRET}`).toString("base64");
-
-  const r = await fetch(url, {
-    headers: {
-      Authorization: `Basic ${basic}`,
-      Accept: "application/json",
-    },
-    timeout: 20000,
-  });
-
-  const text = await r.text();
-  if (!r.ok) {
-    // Essaie de parser JSON d’erreur Woo
-    try {
-      const j = JSON.parse(text);
-      const msg = j.message || j.error || JSON.stringify(j);
-      throw new Error(`Woo ${r.status}: ${msg}`);
-    } catch {
-      throw new Error(`Woo ${r.status}: ${text}`);
-    }
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error("Réponse Woo non-JSON: " + text.slice(0, 500));
-  }
-}
-
-// ------- MCP endpoint -------
+// ---------- MCP endpoint ----------
 app.post("/mcp", mcpAuth, async (req, res) => {
   try {
     const { method, params } = req.body || {};
 
-    // 1) tools.list pour tester vite
     if (method === "tools.list") {
       return res.json({
         type: "tool_result",
@@ -94,7 +102,7 @@ app.post("/mcp", mcpAuth, async (req, res) => {
               input_schema: {
                 type: "object",
                 properties: {
-                  status:   { type: "string", default: "processing" },
+                  status:   { type: "string",  default: "processing" },
                   per_page: { type: "number",  default: 5 }
                 },
                 required: ["status"]
@@ -105,7 +113,6 @@ app.post("/mcp", mcpAuth, async (req, res) => {
       });
     }
 
-    // 2) tools.call
     if (method === "tools.call") {
       const name = params?.name;
       const args = params?.arguments || {};
@@ -114,21 +121,18 @@ app.post("/mcp", mcpAuth, async (req, res) => {
         const status   = String(args.status || "processing");
         const per_page = Math.min(Math.max(parseInt(args.per_page || 5, 10), 1), 50);
 
-        // Exemple d’URL Woo (WC_URL DOIT être: https://anam-and-styles.com/wp-json/wc/v3)
         const q = `orders?status=${encodeURIComponent(status)}&per_page=${per_page}`;
-
         const data = await wooGetJSON(q);
 
-        // On renvoie un condensé (id, number, total, date, client)
         const orders = (Array.isArray(data) ? data : []).map(o => ({
-          id: o.id,
-          number: o.number,
-          total: o.total,
-          currency: o.currency,
+          id:           o.id,
+          number:       o.number,
+          total:        o.total,
+          currency:     o.currency,
           date_created: o.date_created,
-          status: o.status,
-          customer: `${o.billing?.first_name || ""} ${o.billing?.last_name || ""}`.trim(),
-          city: o.shipping?.city || ""
+          status:       o.status,
+          customer:     `${o.billing?.first_name || ""} ${o.billing?.last_name || ""}`.trim(),
+          city:         o.shipping?.city || o.billing?.city || ""
         }));
 
         return res.json({ type: "tool_result", content: orders });
@@ -140,18 +144,11 @@ app.post("/mcp", mcpAuth, async (req, res) => {
     return res.json({ type: "tool_error", error: "Unknown method" });
   } catch (err) {
     console.error("MCP ERROR:", err);
-    // ⚠️ On retourne l’erreur réelle pour déboguer
     res.status(500).json({ error: String(err?.message || err) });
   }
 });
 
-// Démarrage
-app.listen(PORT, () => {
-  console.log(`✅ MCP server on ${PORT}`);
-});
-// ---------- ROUTES COMPTA (à placer AVANT app.listen) ----------
-
-// Petite page de test pour voir que le dashboard répond
+// ---------- ROUTES COMPTA ----------
 app.get("/accounting-dashboard", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="fr"><meta charset="utf-8" />
@@ -163,30 +160,29 @@ app.get("/accounting-dashboard", (_req, res) => {
 </body></html>`);
 });
 
-// Utilitaire: bornes d'un mois (UTC)
+// Bornes d'un mois (UTC)
 function monthRange(year, month) {
-  // month = 1..12
   const y = parseInt(year, 10);
-  const m = parseInt(month, 10) - 1;
-  const afterISO = new Date(Date.UTC(y, m, 1, 0, 0, 0)).toISOString();
-  const beforeISO = new Date(Date.UTC(y, m + 1, 1, 0, 0, 0)).toISOString();
+  const m = parseInt(month, 10) - 1; // 1..12 => 0..11
+  const afterISO  = new Date(Date.UTC(y, m,   1, 0, 0, 0)).toISOString();
+  const beforeISO = new Date(Date.UTC(y, m+1, 1, 0, 0, 0)).toISOString();
   return { afterISO, beforeISO };
 }
 
-// Récupère tous les refunds d'une commande
+// Refunds d'une commande
 async function wooGetRefunds(orderId) {
   return await wooGetJSON(`orders/${orderId}/refunds`);
 }
 
 /**
- * /orders-flat
+ * GET /orders-flat
  * Query:
  *  - year=2025
  *  - month=10
  *  - statuses=completed,processing
- *  - limit=500 (max lignes retournées; côté Woo on pagine par 100)
- *  - include_refunds=true|false (ajoute des lignes "Remboursé" négatives)
- *  - mode=excel|woo (juste informatif)
+ *  - limit=500 (max lignes renvoyées)
+ *  - include_refunds=true|false
+ *  - mode=excel|woo (info)
  */
 app.get("/orders-flat", async (req, res) => {
   try {
@@ -197,13 +193,9 @@ app.get("/orders-flat", async (req, res) => {
     const limit = Math.max(1, Math.min(parseInt(req.query.limit || "500", 10), 2000));
     const includeRefunds = String(req.query.include_refunds || "true").toLowerCase() === "true";
 
-    if (!WC_URL || !WC_KEY || !WC_SECRET) {
-      return res.status(500).json({ ok:false, error:"WooCommerce credentials not set" });
-    }
-
+    requireWooCreds();
     const { afterISO, beforeISO } = monthRange(year, month);
 
-    // Récupération paginée des commandes (on limite par 100 par requête)
     const rows = [];
     for (const status of statuses) {
       let page = 1;
@@ -214,11 +206,11 @@ app.get("/orders-flat", async (req, res) => {
         if (!Array.isArray(data) || data.length === 0) break;
 
         for (const o of data) {
-          // Ligne "Paiement"
+          // Ligne "Payé"
           rows.push({
             date: (o.date_created || "").replace("T"," ").replace("Z",""),
             reference: o.number,
-            nom: (o.billing?.last_name || "").toString().trim(),
+            nom: (o.billing?.last_name  || "").toString().trim(),
             prenom: (o.billing?.first_name || "").toString().trim(),
             nature: "Payé",
             moyen_paiement: o.payment_method_title || o.payment_method || "",
@@ -228,7 +220,7 @@ app.get("/orders-flat", async (req, res) => {
             ville: o.billing?.city || o.shipping?.city || ""
           });
 
-          // Lignes "Remboursé" (si demandé)
+          // Lignes "Remboursé"
           if (includeRefunds) {
             const refunds = await wooGetRefunds(o.id);
             if (Array.isArray(refunds) && refunds.length > 0) {
@@ -236,7 +228,7 @@ app.get("/orders-flat", async (req, res) => {
                 rows.push({
                   date: (r.date_created || o.date_created || "").replace("T"," ").replace("Z",""),
                   reference: `${o.number}-R${r.id}`,
-                  nom: (o.billing?.last_name || "").toString().trim(),
+                  nom: (o.billing?.last_name  || "").toString().trim(),
                   prenom: (o.billing?.first_name || "").toString().trim(),
                   nature: "Remboursé",
                   moyen_paiement: o.payment_method_title || o.payment_method || "",
@@ -251,13 +243,14 @@ app.get("/orders-flat", async (req, res) => {
 
           if (rows.length >= limit) break;
         }
+
         if (data.length < per_page || rows.length >= limit) break;
         page++;
       }
       if (rows.length >= limit) break;
     }
 
-    return res.json({
+    res.json({
       ok: true,
       year, month, statuses, include_refunds: includeRefunds,
       count: rows.length,
@@ -267,4 +260,9 @@ app.get("/orders-flat", async (req, res) => {
     console.error("orders-flat ERROR:", e);
     res.status(500).json({ ok:false, error: e?.message || "Server error" });
   }
+});
+
+// ---------- START ----------
+app.listen(PORT, () => {
+  console.log(`✅ MCP server on ${PORT}`);
 });

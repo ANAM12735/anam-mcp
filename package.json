@@ -1,15 +1,18 @@
 {
   "name": "anam-mcp",
   "version": "1.0.0",
-  "description": "Serveur comptabilité Anam & Styles",
-  "main": "index.js",
+  "description": "Serveur MCP Anam & Styles",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "axios": "^1.7.7",
-    "cors": "^2.8.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "dotenv": "^16.4.5"
   }
 }

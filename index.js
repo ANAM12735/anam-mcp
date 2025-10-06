@@ -29,7 +29,7 @@ app.use((req, res, next) => {
   const token = process.env.MCP_TOKEN || "";
   if (!token) return next(); // pas de token => pas d'auth requise
 
-  const openPaths = new Set(["/", "/dashboard", "/accounting-dashboard", "/debug-auth"]);
+  const openPaths = new Set(["/", "/dashboard", "/debug-auth", "/orders", "/accounting", "/accounting-dashboard"]);
   if (openPaths.has(req.path)) return next();
 
   const auth = req.headers.authorization || "";

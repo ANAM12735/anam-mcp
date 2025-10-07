@@ -1,3 +1,9 @@
+// Ajouter en haut du fichier
+const cache = new Map();
+
+function getCacheKey(req) {
+  return `orders-flat:${req.query.year}:${req.query.month}:${req.query.statuses}:${req.query.limit}:${req.query.include_refunds}`;
+}
 import express from "express";
 
 const app = express();

@@ -1,4 +1,6 @@
 import express from "express";
+import fetch from "node-fetch";
+import https from "https";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -7,6 +9,15 @@ const WC_URL = (process.env.WC_URL || "").replace(/\/+$/, "");
 const WC_KEY = process.env.WC_KEY || "";
 const WC_SECRET = process.env.WC_SECRET || "";
 
+// Agent HTTPS configuré pour éviter les blocages
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 10,
+  timeout: 30000,
+  minVersion: 'TLSv1.2',
+  rejectUnauthorized: true
+});
+
 app.use(express.json());
 
 // ======================= HEALTH & DEBUG =======================
@@ -14,8 +25,8 @@ app.get("/", (_req, res) => {
   res.json({ 
     ok: true, 
     service: "MCP Anam", 
-    version: 4,
-    message: "Service en ligne - Vérification WooCommerce en cours"
+    version: 6,
+    status: "Opérationnel"
   });
 });
 
@@ -25,20 +36,18 @@ app.get("/debug-auth", (_req, res) => {
     WC_URL_set: !!WC_URL,
     WC_KEY_set: !!WC_KEY,
     WC_SECRET_set: !!WC_SECRET,
-    WC_URL_value: WC_URL || "non définie"
+    WC_URL_value: WC_URL
   });
 });
 
-// ======================= TEST DE CONNEXION WOOCOMMERCE =======================
+// ======================= TEST DE CONNEXION AMÉLIORÉ =======================
 app.get("/test-woocommerce", async (_req, res) => {
   try {
     if (!WC_URL || !WC_KEY || !WC_SECRET) {
       return res.json({ 
         ok: false, 
         error: "Variables manquantes",
-        WC_URL: !!WC_URL,
-        WC_KEY: !!WC_KEY, 
-        WC_SECRET: !!WC_SECRET
+        details: "Vérifiez WC_URL, WC_KEY, WC_SECRET dans Render"
       });
     }
 
@@ -47,54 +56,108 @@ app.get("/test-woocommerce", async (_req, res) => {
     
     console.log("🔍 Test WooCommerce URL:", testUrl);
     
+    // Test avec node-fetch et agent HTTPS
     const response = await fetch(testUrl, {
+      method: "GET",
       headers: {
         Authorization: `Basic ${basic}`,
         Accept: "application/json",
-        "User-Agent": "anam-mcp-test/1.0"
+        "User-Agent": "MCP-Anam/1.0 (+https://anam-mcp.onrender.com)",
+        "Content-Type": "application/json"
       },
-      timeout: 10000
-    }).catch(err => {
-      return res.json({
-        ok: false,
-        error: `Erreur fetch: ${err.message}`,
-        type: "network_error",
-        url: testUrl
-      });
+      agent: httpsAgent,
+      timeout: 15000
     });
 
+    console.log("🔍 Response status:", response.status);
+    
     if (!response.ok) {
       const errorText = await response.text();
       return res.json({
         ok: false,
-        error: `HTTP ${response.status}: ${errorText}`,
-        type: "http_error",
-        status: response.status
+        error: `HTTP ${response.status}`,
+        details: errorText,
+        type: "http_error"
       });
     }
 
     const data = await response.json();
     return res.json({
       ok: true,
-      message: "Connexion WooCommerce réussie!",
+      message: "✅ Connexion WooCommerce réussie!",
       orders_count: Array.isArray(data) ? data.length : 0,
       test_data: Array.isArray(data) && data.length > 0 ? {
         id: data[0].id,
         number: data[0].number,
-        status: data[0].status
-      } : null
+        status: data[0].status,
+        total: data[0].total
+      } : "Aucune commande trouvée"
     });
 
   } catch (error) {
+    console.error("❌ Test error:", error);
     return res.json({
       ok: false,
       error: `Exception: ${error.message}`,
-      type: "exception"
+      type: "network_error",
+      suggestion: "Vérifiez le firewall/WAF de votre site"
     });
   }
 });
 
-// ======================= MCP ENDPOINT (SIMULÉ POUR L'INSTANT) =======================
+// ======================= WOOCOMMERCE UTILS =======================
+async function wooGetJSON(pathWithQuery, options = {}) {
+  const { attempts = 3, timeout = 20000 } = options;
+  
+  if (!WC_URL || !WC_KEY || !WC_SECRET) {
+    throw new Error("Configuration WooCommerce manquante");
+  }
+
+  const url = `${WC_URL}/${pathWithQuery.replace(/^\/+/, "")}`;
+  const basic = Buffer.from(`${WC_KEY}:${WC_SECRET}`).toString("base64");
+
+  let lastError;
+  
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      console.log(`🔍 WooCommerce attempt ${attempt}/${attempts}: ${pathWithQuery}`);
+      
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Basic ${basic}`,
+          Accept: "application/json",
+          "User-Agent": "MCP-Anam/1.0",
+          "Content-Type": "application/json"
+        },
+        agent: httpsAgent,
+        timeout: timeout
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`WooCommerce ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      console.log(`✅ WooCommerce success: ${pathWithQuery}`);
+      return data;
+
+    } catch (error) {
+      lastError = error;
+      console.log(`❌ WooCommerce attempt ${attempt} failed:`, error.message);
+      
+      if (attempt === attempts) break;
+      
+      // Attente avant retry
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+
+  throw lastError;
+}
+
+// ======================= MCP ENDPOINT =======================
 function mcpAuth(req, res, next) {
   if (!MCP_TOKEN) return res.status(500).json({ error: "MCP_TOKEN non défini" });
   const auth = req.headers.authorization || "";
@@ -113,7 +176,7 @@ app.post("/mcp", mcpAuth, async (req, res) => {
         content: {
           tools: [{
             name: "getOrders",
-            description: "Liste les commandes WooCommerce (en maintenance)",
+            description: "Liste les commandes WooCommerce",
             input_schema: {
               type: "object",
               properties: {
@@ -127,568 +190,132 @@ app.post("/mcp", mcpAuth, async (req, res) => {
     }
 
     if (method === "tools.call") {
-      return res.json({
-        type: "tool_error", 
-        error: "Service WooCommerce temporairement indisponible - Connexion en cours de résolution"
-      });
+      const name = params?.name;
+      const args = params?.arguments || {};
+
+      if (name === "getOrders") {
+        const status = String(args.status || "processing");
+        const per_page = Math.min(Math.max(parseInt(args.per_page || 5, 10), 1), 50);
+
+        const data = await wooGetJSON(`orders?status=${encodeURIComponent(status)}&per_page=${per_page}`);
+
+        const orders = (Array.isArray(data) ? data : []).map(o => ({
+          id: o.id,
+          number: o.number,
+          total: o.total,
+          currency: o.currency,
+          date_created: o.date_created,
+          status: o.status,
+          customer: `${o.billing?.first_name || ""} ${o.billing?.last_name || ""}`.trim(),
+          city: o.shipping?.city || o.billing?.city || ""
+        }));
+
+        return res.json({ type: "tool_result", content: orders });
+      }
+      return res.json({ type: "tool_error", error: `Unknown tool: ${name}` });
     }
 
     return res.json({ type: "tool_error", error: "Unknown method" });
   } catch (err) {
+    console.error("MCP ERROR:", err);
     res.status(500).json({ error: String(err.message || err) });
   }
 });
 
-// ======================= ORDERS-FLAT (VERSION SIMULÉE) =======================
-app.get("/orders-flat", async (req, res) => {
-  try {
-    // DONNÉES SIMULÉES en attendant la résolution WooCommerce
-    const year = parseInt(req.query.year || "2025", 10);
-    const month = parseInt(req.query.month || "10", 10);
-    
-    const simulatedData = {
-      ok: true,
-      year,
-      month,
-      statuses: req.query.statuses || "completed,processing",
-      include_refunds: true,
-      count: 12,
-      note: "Données simulées - Connexion WooCommerce en cours de diagnostic",
-      rows: [
-        {
-          date: "2025-10-15 14:30:00",
-          reference: "1001",
-          nom: "DUPONT",
-          prenom: "Marie",
-          nature: "Payé",
-          moyen_paiement: "Carte bancaire",
-          montant: 45.90,
-          frais_port: 4.90,
-          remise: 5.00,
-          currency: "EUR",
-          status: "completed",
-          ville: "Paris"
-        },
-        {
-          date: "2025-10-16 10:15:00", 
-          reference: "1002",
-          nom: "MARTIN",
-          prenom: "Pierre",
-          nature: "Payé",
-          moyen_paiement: "PayPal",
-          montant: 89.50,
-          frais_port: 0,
-          remise: 0,
-          currency: "EUR", 
-          status: "processing",
-          ville: "Lyon"
-        },
-        {
-          date: "2025-10-17 16:45:00",
-          reference: "1003",
-          nom: "BERNARD",
-          prenom: "Sophie", 
-          nature: "Payé",
-          moyen_paiement: "Virement",
-          montant: 120.00,
-          frais_port: 5.00,
-          remise: 10.00,
-          currency: "EUR",
-          status: "completed",
-          ville: "Marseille"
-        },
-        {
-          date: "2025-10-18 11:20:00",
-          reference: "1001-R1", 
-          nom: "DUPONT",
-          prenom: "Marie",
-          nature: "Remboursé",
-          moyen_paiement: "Carte bancaire",
-          montant: -45.90,
-          frais_port: 0,
-          remise: 0,
-          currency: "EUR",
-          status: "refunded",
-          ville: "Paris"
-        }
-      ]
-    };
-
-    // Ajout de données supplémentaires pour les tests
-    for (let i = 4; i <= 12; i++) {
-      simulatedData.rows.push({
-        date: `2025-10-${10 + i} 09:00:00`,
-        reference: `100${i}`,
-        nom: `CLIENT${i}`,
-        prenom: `Prénom${i}`,
-        nature: "Payé",
-        moyen_paiement: i % 2 === 0 ? "Carte bancaire" : "PayPal",
-        montant: 50 + (i * 10),
-        frais_port: i % 3 === 0 ? 4.90 : 0,
-        remise: i % 4 === 0 ? 5.00 : 0,
-        currency: "EUR",
-        status: i % 5 === 0 ? "processing" : "completed",
-        ville: i % 2 === 0 ? "Paris" : "Lyon"
-      });
-    }
-
-    res.json(simulatedData);
-
-  } catch (error) {
-    res.status(500).json({ 
-      ok: false, 
-      error: error.message
-    });
-  }
-});
-
-// ======================= DASHBOARD AMÉLIORÉ =======================
+// ======================= DASHBOARD COMPLET =======================
 app.get("/accounting-dashboard", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="fr">
 <head>
 <meta charset="utf-8"/>
 <title>Comptabilité — MCP</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { 
-    font-family: system-ui, -apple-system, sans-serif; 
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: #333;
-    line-height: 1.6;
-    padding: 20px;
-    min-height: 100vh;
-  }
-  
-  .container {
-    max-width: 1200px;
-    margin: 0 auto;
-    background: white;
-    border-radius: 20px;
-    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-    overflow: hidden;
-  }
-  
-  .header {
-    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-    color: white;
-    padding: 2rem;
-    text-align: center;
-  }
-  
-  h1 {
-    font-size: 2.5rem;
-    margin-bottom: 0.5rem;
-    font-weight: 700;
-  }
-  
-  .subtitle {
-    font-size: 1.1rem;
-    opacity: 0.9;
-  }
-  
-  .status-alert {
-    background: #fef3c7;
-    border: 2px solid #f59e0b;
-    border-radius: 10px;
-    padding: 1rem;
-    margin: 1rem;
-    text-align: center;
-  }
-  
-  .alert-warning {
-    background: #fef3c7;
-    color: #92400e;
-    border-color: #f59e0b;
-  }
-  
-  .alert-success {
-    background: #d1fae5;
-    color: #065f46;
-    border-color: #10b981;
-  }
-  
-  .controls {
-    padding: 2rem;
-    background: #f8fafc;
-  }
-  
-  .filters {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  
-  .filter-group label {
-    display: block;
-    margin-bottom: 0.5rem;
-    font-weight: 600;
-    color: #475569;
-  }
-  
-  select, input {
-    width: 100%;
-    padding: 0.75rem;
-    border: 2px solid #e2e8f0;
-    border-radius: 8px;
-    font-size: 1rem;
-  }
-  
-  .actions {
-    display: flex;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
-  
-  .btn {
-    padding: 0.875rem 1.5rem;
-    border: none;
-    border-radius: 8px;
-    font-weight: 600;
-    cursor: pointer;
-    font-size: 1rem;
-    transition: all 0.2s;
-    text-decoration: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  
-  .btn-primary {
-    background: #10b981;
-    color: white;
-  }
-  
-  .btn-primary:hover {
-    background: #059669;
-  }
-  
-  .btn-secondary {
-    background: #3b82f6;
-    color: white;
-  }
-  
-  .btn-secondary:hover {
-    background: #2563eb;
-  }
-  
-  .btn-outline {
-    background: white;
-    color: #475569;
-    border: 2px solid #e2e8f0;
-  }
-  
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-    padding: 2rem;
-  }
-  
-  .stat-card {
-    background: white;
-    padding: 1.5rem;
-    border-radius: 12px;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-    text-align: center;
-    border: 2px solid #f1f5f9;
-  }
-  
-  .stat-value {
-    font-size: 2rem;
-    font-weight: 700;
-    color: #1e293b;
-    margin-bottom: 0.5rem;
-  }
-  
-  .stat-label {
-    color: #64748b;
-    font-size: 0.9rem;
-  }
-  
-  .results {
-    padding: 0 2rem 2rem;
-  }
-  
-  .table-container {
-    overflow-x: auto;
-    border-radius: 12px;
-    border: 2px solid #f1f5f9;
-  }
-  
-  table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  
-  th {
-    background: #f8fafc;
-    padding: 1rem;
-    text-align: left;
-    font-weight: 600;
-    color: #475569;
-    border-bottom: 2px solid #e2e8f0;
-  }
-  
-  td {
-    padding: 1rem;
-    border-bottom: 1px solid #f1f5f9;
-  }
-  
-  tr:hover {
-    background: #f8fafc;
-  }
-  
-  .positive { color: #10b981; font-weight: 600; }
-  .negative { color: #ef4444; font-weight: 600; }
-  .refund { background: #fef2f2; }
-  
-  .loading {
-    text-align: center;
-    padding: 3rem;
-    color: #64748b;
-  }
-  
-  .error {
-    background: #fef2f2;
-    color: #dc2626;
-    padding: 1rem;
-    border-radius: 8px;
-    margin: 1rem 0;
-  }
+  body { font-family: system-ui, Arial; background: #fafafa; margin: 0; padding: 24px; }
+  .container { max-width: 1200px; margin: 0 auto; background: white; padding: 24px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+  h1 { color: #333; margin-bottom: 8px; }
+  .alert { background: #e3f2fd; border: 2px solid #2196f3; padding: 16px; border-radius: 8px; margin: 20px 0; }
+  .btn { padding: 12px 20px; border: none; border-radius: 6px; background: #007bff; color: white; cursor: pointer; margin: 5px; }
+  .btn:hover { background: #0056b3; }
+  .btn-success { background: #28a745; }
+  .btn-warning { background: #ffc107; color: #000; }
 </style>
 </head>
 <body>
   <div class="container">
-    <div class="header">
-      <h1>📊 Tableau de Bord Comptable</h1>
-      <p class="subtitle">MCP Anam • Gestion WooCommerce</p>
+    <h1>📊 Tableau de Bord Comptable</h1>
+    <p>MCP Anam • Données WooCommerce en temps réel</p>
+    
+    <div class="alert" id="statusAlert">
+      <strong>🔧 Test de connexion en cours...</strong>
     </div>
 
-    <div class="status-alert alert-warning" id="statusAlert">
-      <strong>⚠️ Mode démonstration</strong> - Connexion WooCommerce en cours de diagnostic
+    <div>
+      <button class="btn btn-success" onclick="loadRealData()">📥 Charger les données réelles</button>
+      <button class="btn btn-warning" onclick="testConnection()">🔧 Tester la connexion</button>
+      <a href="/debug-auth" class="btn" target="_blank">🔍 Debug</a>
     </div>
 
-    <div class="controls">
-      <div class="filters">
-        <div class="filter-group">
-          <label>Année</label>
-          <select id="yearSelect">
-            <option value="2025">2025</option>
-            <option value="2024">2024</option>
-          </select>
-        </div>
-        
-        <div class="filter-group">
-          <label>Mois</label>
-          <select id="monthSelect">
-            <option value="1">Janvier</option>
-            <option value="2">Février</option>
-            <option value="3">Mars</option>
-            <option value="4">Avril</option>
-            <option value="5">Mai</option>
-            <option value="6">Juin</option>
-            <option value="7">Juillet</option>
-            <option value="8">Août</option>
-            <option value="9">Septembre</option>
-            <option value="10" selected>Octobre</option>
-            <option value="11">Novembre</option>
-            <option value="12">Décembre</option>
-          </select>
-        </div>
-        
-        <div class="filter-group">
-          <label>Statuts</label>
-          <select id="statusSelect">
-            <option value="completed">Terminées</option>
-            <option value="completed,processing" selected>Terminées + Traitement</option>
-          </select>
-        </div>
-        
-        <div class="filter-group">
-          <label>Limite</label>
-          <input type="number" id="limitInput" value="100" min="1" max="1000">
-        </div>
-      </div>
-
-      <div class="actions">
-        <button class="btn btn-primary" onclick="loadData()">
-          📥 Charger les données
-        </button>
-        <button class="btn btn-secondary" onclick="exportData()">
-          📊 Exporter les données
-        </button>
-        <button class="btn btn-outline" onclick="testConnection()">
-          🔧 Tester la connexion
-        </button>
-        <a href="/debug-auth" class="btn btn-outline" target="_blank">
-          🔍 Debug détaillé
-        </a>
-      </div>
-    </div>
-
-    <div class="stats" id="statsContainer">
-      <div class="stat-card">
-        <div class="stat-value" id="totalOrders">-</div>
-        <div class="stat-label">Commandes</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="totalRevenue">-</div>
-        <div class="stat-label">Chiffre d'affaires</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="totalRefunds">-</div>
-        <div class="stat-label">Remboursements</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="netRevenue">-</div>
-        <div class="stat-label">Revenu net</div>
-      </div>
-    </div>
-
-    <div class="results">
-      <div class="table-container">
-        <table id="resultsTable">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Référence</th>
-              <th>Client</th>
-              <th>Nature</th>
-              <th>Moyen paiement</th>
-              <th>Montant</th>
-              <th>Détails</th>
-              <th>Ville</th>
-              <th>Statut</th>
-            </tr>
-          </thead>
-          <tbody id="resultsBody">
-            <tr>
-              <td colspan="9" class="loading">
-                ⏳ Cliquez sur "Charger les données" pour commencer
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <div id="results" style="margin-top: 20px;"></div>
   </div>
 
   <script>
-    async function loadData() {
-      const year = document.getElementById('yearSelect').value;
-      const month = document.getElementById('monthSelect').value;
-      const statuses = document.getElementById('statusSelect').value;
-      const limit = document.getElementById('limitInput').value;
-      
-      const resultsBody = document.getElementById('resultsBody');
-      resultsBody.innerHTML = '<tr><td colspan="9" class="loading">⏳ Chargement des données en cours...</td></tr>';
-      
-      try {
-        const url = \`/orders-flat?year=\${year}&month=\${month}&statuses=\${statuses}&limit=\${limit}&include_refunds=true\`;
-        const response = await fetch(url);
-        const data = await response.json();
-        
-        if (!data.ok) throw new Error(data.error || 'Erreur de chargement');
-        
-        displayResults(data);
-        updateStats(data);
-        
-      } catch (error) {
-        resultsBody.innerHTML = \`<tr><td colspan="9" class="error">❌ Erreur: \${error.message}</td></tr>\`;
-        resetStats();
-      }
-    }
-
-    function displayResults(data) {
-      const tbody = document.getElementById('resultsBody');
-      
-      if (!data.rows || data.rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="loading">📭 Aucune donnée trouvée</td></tr>';
-        return;
-      }
-      
-      tbody.innerHTML = data.rows.map(row => \`
-        <tr class="\${row.nature === 'Remboursé' ? 'refund' : ''}">
-          <td>\${row.date}</td>
-          <td><strong>\${row.reference}</strong></td>
-          <td>\${row.prenom} \${row.nom}</td>
-          <td>\${row.nature}</td>
-          <td>\${row.moyen_paiement}</td>
-          <td class="\${row.montant >= 0 ? 'positive' : 'negative'}">
-            \${row.montant.toFixed(2)} €
-          </td>
-          <td>
-            \${row.frais_port > 0 ? '🚚+' + row.frais_port.toFixed(2) + '€' : ''}
-            \${row.remise > 0 ? '🎁-' + row.remise.toFixed(2) + '€' : ''}
-          </td>
-          <td>\${row.ville}</td>
-          <td>\${row.status}</td>
-        </tr>
-      \`).join('');
-    }
-
-    function updateStats(data) {
-      if (!data.rows) return;
-      
-      const orders = data.rows.filter(r => r.nature === 'Payé');
-      const refunds = data.rows.filter(r => r.nature === 'Remboursé');
-      
-      const totalRevenue = orders.reduce((sum, o) => sum + o.montant, 0);
-      const totalRefunds = Math.abs(refunds.reduce((sum, r) => sum + r.montant, 0));
-      const netRevenue = totalRevenue - totalRefunds;
-      
-      document.getElementById('totalOrders').textContent = orders.length;
-      document.getElementById('totalRevenue').textContent = \`\${totalRevenue.toFixed(2)} €\`;
-      document.getElementById('totalRefunds').textContent = \`\${totalRefunds.toFixed(2)} €\`;
-      document.getElementById('netRevenue').textContent = \`\${netRevenue.toFixed(2)} €\`;
-    }
-
-    function resetStats() {
-      document.getElementById('totalOrders').textContent = '-';
-      document.getElementById('totalRevenue').textContent = '-';
-      document.getElementById('totalRefunds').textContent = '-';
-      document.getElementById('netRevenue').textContent = '-';
-    }
-
     async function testConnection() {
       const alert = document.getElementById('statusAlert');
-      alert.className = 'status-alert alert-warning';
-      alert.innerHTML = '<strong>⏳</strong> Test de connexion en cours...';
+      alert.innerHTML = '<strong>⏳</strong> Test de connexion WooCommerce en cours...';
       
       try {
         const response = await fetch('/test-woocommerce');
         const data = await response.json();
         
         if (data.ok) {
-          alert.className = 'status-alert alert-success';
-          alert.innerHTML = \`<strong>✅</strong> \${data.message}\`;
+          alert.innerHTML = \`<strong>✅</strong> \${data.message} | Commandes: \${data.orders_count}\`;
+          if (data.test_data) {
+            alert.innerHTML += \` | Exemple: #\${data.test_data.number} - \${data.test_data.total}\`;
+          }
         } else {
-          alert.className = 'status-alert alert-warning';
-          alert.innerHTML = \`<strong>❌</strong> Erreur: \${data.error} (Type: \${data.type})\`;
+          alert.innerHTML = \`<strong>❌</strong> Erreur: \${data.error} | Détails: \${data.details || data.suggestion}\`;
         }
       } catch (error) {
-        alert.className = 'status-alert alert-warning';
         alert.innerHTML = \`<strong>❌</strong> Erreur de test: \${error.message}\`;
       }
     }
 
-    function exportData() {
-      const year = document.getElementById('yearSelect').value;
-      const month = document.getElementById('monthSelect').value;
-      const statuses = document.getElementById('statusSelect').value;
-      const limit = document.getElementById('limitInput').value;
+    async function loadRealData() {
+      const results = document.getElementById('results');
+      results.innerHTML = '<p>⏳ Chargement des commandes WooCommerce...</p>';
       
-      const url = \`/orders-flat?year=\${year}&month=\${month}&statuses=\${statuses}&limit=\${limit}&include_refunds=true\`;
-      window.open(url, '_blank');
+      try {
+        const response = await fetch('/orders-flat?year=2025&month=10&statuses=completed,processing&limit=20&include_refunds=true');
+        const data = await response.json();
+        
+        if (data.ok) {
+          const stats = data.rows.reduce((acc, row) => {
+            if (row.nature === 'Payé') {
+              acc.revenue += row.montant;
+              acc.orders++;
+            }
+            if (row.nature === 'Remboursé') acc.refunds += Math.abs(row.montant);
+            return acc;
+          }, { revenue: 0, refunds: 0, orders: 0 });
+          
+          results.innerHTML = \`
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+              <h3>💰 Statistiques Réelles</h3>
+              <p><strong>\${stats.orders}</strong> commandes | <strong>\${stats.revenue.toFixed(2)} €</strong> CA | <strong>\${stats.refunds.toFixed(2)} €</strong> remboursements</p>
+              <p><strong>\${(stats.revenue - stats.refunds).toFixed(2)} €</strong> revenu net</p>
+            </div>
+            <p>✅ Données WooCommerce chargées avec succès!</p>
+          \`;
+        } else {
+          results.innerHTML = \`<p style="color: red;">❌ Erreur: \${data.error}</p>\`;
+        }
+      } catch (error) {
+        results.innerHTML = \`<p style="color: red;">❌ Erreur de chargement: \${error.message}</p>\`;
+      }
     }
 
-    // Chargement automatique au démarrage
-    document.addEventListener('DOMContentLoaded', function() {
-      setTimeout(loadData, 1000);
-    });
+    // Test automatique au chargement
+    setTimeout(testConnection, 1000);
   </script>
 </body>
 </html>`);

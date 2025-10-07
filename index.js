@@ -9,7 +9,6 @@ const WC_URL = (process.env.WC_URL || "").replace(/\/+$/, "");
 const WC_KEY = process.env.WC_KEY || "";
 const WC_SECRET = process.env.WC_SECRET || "";
 
-// Agent HTTPS optimisé
 const httpsAgent = new https.Agent({
   keepAlive: true,
   maxSockets: 10,
@@ -24,8 +23,8 @@ app.get("/", (_req, res) => {
   res.json({ 
     ok: true, 
     service: "MCP Anam", 
-    version: "6.0",
-    status: "🚀 Complètement opérationnel"
+    version: "7.0",
+    status: "🚀 Complètement opérationnel avec export Excel"
   });
 });
 
@@ -152,7 +151,7 @@ app.post("/mcp", mcpAuth, async (req, res) => {
   }
 });
 
-// ======================= ORDERS-FLAT COMPLET =======================
+// ======================= ORDERS-FLAT AVEC EXPORT EXCEL =======================
 app.get("/orders-flat", async (req, res) => {
   try {
     const year = parseInt(req.query.year || new Date().getUTCFullYear(), 10);
@@ -161,6 +160,7 @@ app.get("/orders-flat", async (req, res) => {
       .split(",").map(s => s.trim()).filter(Boolean);
     const limit = Math.max(1, Math.min(parseInt(req.query.limit || "100", 10), 1000));
     const includeRefunds = String(req.query.include_refunds || "true").toLowerCase() === "true";
+    const format = String(req.query.format || "json").toLowerCase();
 
     const { afterISO, beforeISO } = monthRange(year, month);
     const rows = [];
@@ -181,13 +181,11 @@ app.get("/orders-flat", async (req, res) => {
         }
 
         for (const order of data) {
-          // Calcul du montant réel avec frais et promos
           const total = parseFloat(order.total || "0") || 0;
           const shipping = parseFloat(order.shipping_total || "0") || 0;
           const discount = Math.abs(parseFloat(order.discount_total || "0") || 0);
           const montantReel = total + shipping - discount;
 
-          // Ligne commande
           rows.push({
             date: (order.date_created || "").replace("T", " ").replace("Z", ""),
             reference: order.number,
@@ -203,7 +201,6 @@ app.get("/orders-flat", async (req, res) => {
             ville: order.billing?.city || order.shipping?.city || ""
           });
 
-          // Remboursements
           if (includeRefunds) {
             try {
               const refunds = await wooGetRefunds(order.id);
@@ -227,7 +224,7 @@ app.get("/orders-flat", async (req, res) => {
                 }
               }
             } catch (refundError) {
-              console.log("⚠️ Remboursements ignorés pour la commande", order.number);
+              console.log("⚠️ Remboursements ignorés pour", order.number);
             }
           }
 
@@ -237,7 +234,6 @@ app.get("/orders-flat", async (req, res) => {
         if (data.length < per_page) hasMore = false;
         page++;
         
-        // Petite pause entre les pages
         if (hasMore && rows.length < limit) {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
@@ -246,6 +242,42 @@ app.get("/orders-flat", async (req, res) => {
       if (rows.length >= limit) break;
     }
 
+    // ======================= EXPORT EXCEL RÉEL =======================
+    if (format === "excel" || format === "csv") {
+      const headers = [
+        "Date", "Référence", "Nom", "Prénom", "Nature", 
+        "Moyen de paiement", "Montant (€)", "Frais de port (€)", 
+        "Remise (€)", "Devise", "Statut", "Ville"
+      ];
+      
+      const csvRows = rows.map(row => [
+        `"${row.date}"`,
+        `"${row.reference}"`,
+        `"${row.nom}"`,
+        `"${row.prenom}"`,
+        `"${row.nature}"`,
+        `"${row.moyen_paiement}"`,
+        row.montant.toFixed(2).replace('.', ','),
+        row.frais_port.toFixed(2).replace('.', ','),
+        row.remise.toFixed(2).replace('.', ','),
+        `"${row.currency}"`,
+        `"${row.status}"`,
+        `"${row.ville}"`
+      ]);
+      
+      const csvContent = [
+        headers.join(";"),
+        ...csvRows.map(row => row.join(";"))
+      ].join("\n");
+      
+      const filename = `commandes_${year}-${String(month).padStart(2, '0')}.csv`;
+      
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(csvContent);
+    }
+
+    // ======================= RÉPONSE JSON =======================
     res.json({
       ok: true,
       year,
@@ -265,7 +297,7 @@ app.get("/orders-flat", async (req, res) => {
   }
 });
 
-// ======================= DASHBOARD PROFESSIONNEL =======================
+// ======================= DASHBOARD AVEC EXPORT CORRIGÉ =======================
 app.get("/accounting-dashboard", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="fr">
@@ -542,20 +574,6 @@ app.get("/accounting-dashboard", (_req, res) => {
     margin: 1rem 0;
     border: 1px solid #fecaca;
   }
-  
-  .success {
-    background: #f0fdf4;
-    color: #16a34a;
-    padding: 1.2rem;
-    border-radius: 10px;
-    margin: 1rem 0;
-    border: 1px solid #bbf7d0;
-  }
-  
-  .details-row {
-    font-size: 0.85rem;
-    color: #64748b;
-  }
 </style>
 </head>
 <body>
@@ -566,7 +584,7 @@ app.get("/accounting-dashboard", (_req, res) => {
     </div>
 
     <div class="status-success">
-      ✅ <strong>Connexion WooCommerce active</strong> • Données réelles chargées
+      ✅ <strong>Connexion WooCommerce active</strong> • Export Excel fonctionnel
     </div>
 
     <div class="controls">
@@ -621,7 +639,7 @@ app.get("/accounting-dashboard", (_req, res) => {
         <button class="btn btn-primary" onclick="loadData()">
           📥 Charger les données
         </button>
-        <button class="btn btn-secondary" onclick="exportData()">
+        <button class="btn btn-secondary" onclick="exportExcel()">
           📊 Exporter Excel
         </button>
         <button class="btn btn-outline" onclick="resetFilters()">
@@ -689,7 +707,6 @@ app.get("/accounting-dashboard", (_req, res) => {
     const currentYear = new Date().getUTCFullYear();
     const currentMonth = new Date().getUTCMonth() + 1;
 
-    // Générer les boutons mois rapides
     function generateQuickMonths() {
       const container = document.getElementById('quickMonths');
       months.forEach((month, index) => {
@@ -710,7 +727,6 @@ app.get("/accounting-dashboard", (_req, res) => {
       });
     }
 
-    // Charger les données
     async function loadData() {
       const year = document.getElementById('yearSelect').value;
       const month = document.getElementById('monthSelect').value;
@@ -736,7 +752,6 @@ app.get("/accounting-dashboard", (_req, res) => {
       }
     }
 
-    // Afficher les résultats
     function displayResults(data) {
       const tbody = document.getElementById('resultsBody');
       
@@ -755,7 +770,7 @@ app.get("/accounting-dashboard", (_req, res) => {
           <td class="\${row.montant >= 0 ? 'positive' : 'negative'}">
             \${row.montant.toFixed(2)} €
           </td>
-          <td class="details-row">
+          <td style="font-size: 0.85rem; color: #64748b;">
             \${row.frais_port > 0 ? '🚚+' + row.frais_port.toFixed(2) + '€' : ''}
             \${row.remise > 0 ? '🎁-' + row.remise.toFixed(2) + '€' : ''}
           </td>
@@ -765,7 +780,6 @@ app.get("/accounting-dashboard", (_req, res) => {
       \`).join('');
     }
 
-    // Mettre à jour les statistiques
     function updateStats(data) {
       if (!data.rows) return;
       
@@ -789,18 +803,24 @@ app.get("/accounting-dashboard", (_req, res) => {
       document.getElementById('netRevenue').textContent = '-';
     }
 
-    // Exporter les données
-    function exportData() {
+    function exportExcel() {
       const year = document.getElementById('yearSelect').value;
       const month = document.getElementById('monthSelect').value;
       const statuses = document.getElementById('statusSelect').value;
       const limit = document.getElementById('limitInput').value;
       
-      const url = \`/orders-flat?year=\${year}&month=\${month}&statuses=\${statuses}&limit=\${limit}&include_refunds=true\`;
-      window.open(url, '_blank');
+      // Ajouter &format=excel pour forcer l'export CSV
+      const url = \`/orders-flat?year=\${year}&month=\${month}&statuses=\${statuses}&limit=\${limit}&include_refunds=true&format=excel\`;
+      
+      // Créer un lien de téléchargement invisible
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = \`commandes_\${year}-\${String(month).padStart(2, '0')}.csv\`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     }
 
-    // Réinitialiser les filtres
     function resetFilters() {
       document.getElementById('yearSelect').value = currentYear;
       document.getElementById('monthSelect').value = currentMonth;

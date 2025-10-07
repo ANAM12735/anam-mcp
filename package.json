@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node index.js"
   },
-  "engines": { "node": ">=18" },
   "dependencies": {
     "express": "^4.19.2",
     "node-fetch": "^3.3.2"

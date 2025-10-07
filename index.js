@@ -1,16 +1,14 @@
-const express = require('express');
-const WooCommerceRestApi = require("@woocommerce/woocommerce-rest-api").default;
-const axios = require('axios');
-const _ = require('lodash');
-const { Parser } = require('json2csv');
-const ExcelJS = require('exceljs');
-const moment = require('moment-timezone');
+import express from 'express';
+import WooCommerceRestApi from "@woocommerce/woocommerce-rest-api";
+import axios from 'axios';
+import ExcelJS from 'exceljs';
+import moment from 'moment-timezone';
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 // Configuration WooCommerce
-const wooCommerce = new WooCommerceRestApi({
+const wooCommerce = new WooCommerceRestApi.default({
   url: process.env.WOO_URL,
   consumerKey: process.env.WOO_CONSUMER_KEY,
   consumerSecret: process.env.WOO_CONSUMER_SECRET,
@@ -31,7 +29,6 @@ async function getDetailedRefunds(orderId) {
     const detailedRefunds = [];
     
     for (const refund of refunds) {
-      // Calcul du montant total du remboursement (articles + livraison)
       let refundAmount = 0;
       
       // Articles remboursés
@@ -119,7 +116,7 @@ app.get('/dashboard', async (req, res) => {
       totalRevenue: Math.round(totalRevenue * 100) / 100,
       totalShipping: Math.round(totalShipping * 100) / 100,
       totalRefunds: Math.round(totalRefunds * 100) / 100,
-      netRevenue: Math.round(netRevenue * 100) / 100, // ← CORRECTION IMPORTANTE
+      netRevenue: Math.round(netRevenue * 100) / 100,
       orders: orders.map(order => ({
         id: order.id,
         number: order.number,
@@ -192,7 +189,7 @@ app.get('/orders-flat', async (req, res) => {
             prenom: (order.billing.first_name || '').trim(),
             nature: 'Remboursé',
             moyen_paiement: order.payment_method_title || order.payment_method || '',
-            montant: -refund.amount, // Négatif pour remboursement
+            montant: -refund.amount,
             frais_livraison: 0,
             reduction: 0,
             currency: order.currency || 'EUR',
@@ -214,7 +211,7 @@ app.get('/orders-flat', async (req, res) => {
   }
 });
 
-// Export Excel (identique à ton format actuel)
+// Export Excel
 app.get('/export-excel', async (req, res) => {
   try {
     const { month = '2025-06' } = req.query;
@@ -228,7 +225,7 @@ app.get('/export-excel', async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Commandes');
     
-    // En-têtes identiques à ton export actuel
+    // En-têtes
     worksheet.columns = [
       { header: 'Date', key: 'date', width: 20 },
       { header: 'Référence', key: 'reference', width: 15 },
@@ -245,7 +242,7 @@ app.get('/export-excel', async (req, res) => {
     // Ajout des données
     worksheet.addRows(rows);
     
-    // Formatage des nombres
+    // Formatage
     worksheet.getColumn('montant').numFmt = '#,##0.00';
     worksheet.getColumn('frais_livraison').numFmt = '#,##0.00';
     worksheet.getColumn('reduction').numFmt = '#,##0.00';

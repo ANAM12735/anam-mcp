@@ -1,9 +1,3 @@
-// Ajouter en haut du fichier
-const cache = new Map();
-
-function getCacheKey(req) {
-  return `orders-flat:${req.query.year}:${req.query.month}:${req.query.statuses}:${req.query.limit}:${req.query.include_refunds}`;
-}
 import express from "express";
 
 const app = express();
@@ -122,7 +116,7 @@ app.get("/accounting-dashboard", (_req, res) => {
     color: #334155;
     line-height: 1.6;
     padding: 20px;
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 0 auto;
   }
   
@@ -260,7 +254,7 @@ app.get("/accounting-dashboard", (_req, res) => {
   
   .stats {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 1rem;
     margin-bottom: 2rem;
   }
@@ -274,7 +268,7 @@ app.get("/accounting-dashboard", (_req, res) => {
   }
   
   .stat-value {
-    font-size: 2rem;
+    font-size: 1.8rem;
     font-weight: 700;
     color: #1e293b;
     margin-bottom: 0.5rem;
@@ -283,6 +277,12 @@ app.get("/accounting-dashboard", (_req, res) => {
   .stat-label {
     color: #64748b;
     font-size: 0.9rem;
+  }
+  
+  .stat-detail {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    margin-top: 0.25rem;
   }
   
   .results {
@@ -344,12 +344,17 @@ app.get("/accounting-dashboard", (_req, res) => {
     border-radius: 8px;
     margin: 1rem 0;
   }
+  
+  .details-row {
+    font-size: 0.85rem;
+    color: #64748b;
+  }
 </style>
 </head>
 <body>
   <div class="header">
     <h1>📊 Tableau de Bord Comptable</h1>
-    <p class="subtitle">Données WooCommerce en temps réel • MCP Anam</p>
+    <p class="subtitle">Données WooCommerce en temps réel • MCP Anam • Inclut frais de port et promos</p>
   </div>
 
   <div class="controls">
@@ -424,6 +429,7 @@ app.get("/accounting-dashboard", (_req, res) => {
     <div class="stat-card">
       <div class="stat-value" id="totalRevenue">-</div>
       <div class="stat-label">Chiffre d'affaires</div>
+      <div class="stat-detail" id="revenueDetails">inclut frais de port</div>
     </div>
     <div class="stat-card">
       <div class="stat-value" id="totalRefunds">-</div>
@@ -431,7 +437,8 @@ app.get("/accounting-dashboard", (_req, res) => {
     </div>
     <div class="stat-card">
       <div class="stat-value" id="netRevenue">-</div>
-      <div class="stat-label">Revenu net</div>
+      <div class="stat-label">Revenu net encaissé</div>
+      <div class="stat-detail" id="netDetails">après remises</div>
     </div>
   </div>
 
@@ -446,13 +453,14 @@ app.get("/accounting-dashboard", (_req, res) => {
             <th>Nature</th>
             <th>Moyen paiement</th>
             <th>Montant</th>
+            <th>Détails</th>
             <th>Ville</th>
             <th>Statut</th>
           </tr>
         </thead>
         <tbody id="resultsBody">
           <tr>
-            <td colspan="8" class="loading">
+            <td colspan="9" class="loading">
               ⏳ Sélectionnez des filtres et cliquez sur "Charger les données"
             </td>
           </tr>
@@ -499,7 +507,7 @@ app.get("/accounting-dashboard", (_req, res) => {
       const limit = document.getElementById('limitInput').value;
       
       const resultsBody = document.getElementById('resultsBody');
-      resultsBody.innerHTML = '<tr><td colspan="8" class="loading">⏳ Chargement des données en cours...</td></tr>';
+      resultsBody.innerHTML = '<tr><td colspan="9" class="loading">⏳ Chargement des données en cours...</td></tr>';
       
       try {
         const url = \`/orders-flat?year=\${year}&month=\${month}&statuses=\${statuses}&limit=\${limit}&include_refunds=true\`;
@@ -512,7 +520,7 @@ app.get("/accounting-dashboard", (_req, res) => {
         updateStats(data);
         
       } catch (error) {
-        resultsBody.innerHTML = \`<tr><td colspan="8" class="error">❌ Erreur: \${error.message}</td></tr>\`;
+        resultsBody.innerHTML = \`<tr><td colspan="9" class="error">❌ Erreur: \${error.message}</td></tr>\`;
         resetStats();
       }
     }
@@ -522,7 +530,7 @@ app.get("/accounting-dashboard", (_req, res) => {
       const tbody = document.getElementById('resultsBody');
       
       if (!data.rows || data.rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="loading">📭 Aucune donnée trouvée pour cette période</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="loading">📭 Aucune donnée trouvée pour cette période</td></tr>';
         return;
       }
       
@@ -535,6 +543,10 @@ app.get("/accounting-dashboard", (_req, res) => {
           <td>\${row.moyen_paiement}</td>
           <td class="\${row.montant >= 0 ? 'positive' : 'negative'}">
             \${row.montant.toFixed(2)} €
+          </td>
+          <td class="details-row">
+            \${row.frais_port > 0 ? '🚚+' + row.frais_port.toFixed(2) + '€' : ''}
+            \${row.remise > 0 ? '🎁-' + row.remise.toFixed(2) + '€' : ''}
           </td>
           <td>\${row.ville}</td>
           <td>\${row.status}</td>
@@ -553,10 +565,20 @@ app.get("/accounting-dashboard", (_req, res) => {
       const totalRefunds = Math.abs(refunds.reduce((sum, r) => sum + r.montant, 0));
       const netRevenue = totalRevenue - totalRefunds;
       
+      // Calcul des totaux frais et remises
+      const totalFraisPort = orders.reduce((sum, o) => sum + (o.frais_port || 0), 0);
+      const totalRemises = orders.reduce((sum, o) => sum + (o.remise || 0), 0);
+      
       document.getElementById('totalOrders').textContent = orders.length;
       document.getElementById('totalRevenue').textContent = \`\${totalRevenue.toFixed(2)} €\`;
       document.getElementById('totalRefunds').textContent = \`\${totalRefunds.toFixed(2)} €\`;
       document.getElementById('netRevenue').textContent = \`\${netRevenue.toFixed(2)} €\`;
+      
+      // Détails des calculs
+      document.getElementById('revenueDetails').textContent = 
+        \`dont \${totalFraisPort.toFixed(2)}€ frais de port\`;
+      document.getElementById('netDetails').textContent = 
+        \`après \${totalRemises.toFixed(2)}€ de remises\`;
     }
 
     function resetStats() {
@@ -564,6 +586,8 @@ app.get("/accounting-dashboard", (_req, res) => {
       document.getElementById('totalRevenue').textContent = '-';
       document.getElementById('totalRefunds').textContent = '-';
       document.getElementById('netRevenue').textContent = '-';
+      document.getElementById('revenueDetails').textContent = 'inclut frais de port';
+      document.getElementById('netDetails').textContent = 'après remises';
     }
 
     // Exporter Excel
@@ -603,7 +627,7 @@ app.get("/accounting-dashboard", (_req, res) => {
 </html>`);
 });
 
-// ---------- ORDERS-FLAT COMPLETE VERSION ----------
+// ---------- ORDERS-FLAT COMPLETE VERSION (AVEC FRAIS & PROMOS) ----------
 app.get("/orders-flat", async (req, res) => {
   try {
     const year = parseInt(req.query.year || new Date().getUTCFullYear(), 10);
@@ -657,6 +681,14 @@ app.get("/orders-flat", async (req, res) => {
 
         // Traitement des commandes
         for (const order of orders) {
+          // CALCUL DU MONTANT RÉEL ENCAISSÉ (avec frais de port et promos)
+          const total = parseFloat(order.total || "0") || 0;
+          const shipping = parseFloat(order.shipping_total || "0") || 0;
+          const discount = Math.abs(parseFloat(order.discount_total || "0") || 0);
+          
+          // Montant réel = total + frais de port - promos
+          const montantReel = total + shipping - discount;
+
           // Ligne commande
           rows.push({
             date: (order.date_created || "").replace("T", " ").replace("Z", ""),
@@ -665,7 +697,10 @@ app.get("/orders-flat", async (req, res) => {
             prenom: (order.billing?.first_name || "").toString().trim(),
             nature: "Payé",
             moyen_paiement: order.payment_method_title || order.payment_method || "",
-            montant: parseFloat(order.total || "0") || 0,
+            montant: montantReel, // ← NOUVEAU CALCUL
+            montant_original: total, // Garde l'original pour référence
+            frais_port: shipping,
+            remise: discount,
             currency: order.currency || "EUR",
             status: order.status,
             ville: order.billing?.city || order.shipping?.city || ""
@@ -686,6 +721,9 @@ app.get("/orders-flat", async (req, res) => {
                 const refunds = await refundsResponse.json();
                 if (Array.isArray(refunds)) {
                   for (const refund of refunds) {
+                    // Pour les remboursements, on utilise le montant du remboursement
+                    const refundAmount = -Math.abs(parseFloat(refund.amount || "0") || 0);
+                    
                     rows.push({
                       date: (refund.date_created || order.date_created || "").replace("T", " ").replace("Z", ""),
                       reference: `${order.number}-R${refund.id}`,
@@ -693,7 +731,10 @@ app.get("/orders-flat", async (req, res) => {
                       prenom: (order.billing?.first_name || "").toString().trim(),
                       nature: "Remboursé",
                       moyen_paiement: order.payment_method_title || order.payment_method || "",
-                      montant: -Math.abs(parseFloat(refund.amount || "0") || 0),
+                      montant: refundAmount,
+                      montant_original: refundAmount,
+                      frais_port: 0,
+                      remise: 0,
                       currency: order.currency || "EUR",
                       status: "refunded",
                       ville: order.billing?.city || order.shipping?.city || ""
